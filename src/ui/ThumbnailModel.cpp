@@ -1,41 +1,38 @@
 #include "ThumbnailModel.h"
+#include "RenderDocumentCache.h"
 
+#include <QDebug>
+#include <QRunnable>
+#include <QThread>
+#include <QThreadPool>
 #include <QPdfDocument>
 #include <QPainter>
 #include <QMimeData>
 #include <QPdfDocumentRenderOptions>
 #include <QTimer>
 
+namespace {
+constexpr int kMaxInFlight = 2;
+}
+
 ThumbnailModel::ThumbnailModel(QObject *parent)
     : QAbstractListModel(parent)
     , m_cache(300)
 {
+    m_renderPool.setMaxThreadCount(1);
+    m_renderPool.setThreadPriority(QThread::LowPriority);
+
     m_renderTimer = new QTimer(this);
     m_renderTimer->setSingleShot(true);
     m_renderTimer->setInterval(5);
-    connect(m_renderTimer, &QTimer::timeout, this, [this]() {
-        if (m_renderQueue.isEmpty())
-            return;
+    connect(m_renderTimer, &QTimer::timeout, this, &ThumbnailModel::dispatchRenders);
+}
 
-        const int page = m_renderQueue.dequeue();
-        m_queuedPages.remove(page);
-        QPdfDocument *source = m_pageRenderDocument
-                                       && m_pageRenderDocument->status()
-                                              == QPdfDocument::Status::Ready
-                                   ? m_pageRenderDocument
-                                   : m_document;
-        if (source && source->status() == QPdfDocument::Status::Ready
-            && page >= 0 && page < source->pageCount()
-            && !m_cache.object(page)) {
-            const QPixmap thumbnail = renderThumbnail(page);
-            m_cache.insert(page, new QPixmap(thumbnail));
-            const QModelIndex pageIndex = index(page);
-            emit dataChanged(pageIndex, pageIndex, { Qt::DecorationRole });
-        }
-
-        if (!m_renderQueue.isEmpty())
-            m_renderTimer->start();
-    });
+ThumbnailModel::~ThumbnailModel()
+{
+    ++m_renderGeneration;
+    m_renderPool.clear();
+    m_renderPool.waitForDone();
 }
 
 void ThumbnailModel::setDocument(QPdfDocument *document)
@@ -43,31 +40,40 @@ void ThumbnailModel::setDocument(QPdfDocument *document)
     m_document = document;
     if (!m_document) {
         m_cache.clear();
-        m_renderQueue.clear();
-        m_queuedPages.clear();
-        m_renderTimer->stop();
+        invalidateRenders();
         return;
     }
 
     connect(m_document, &QPdfDocument::statusChanged, this, [this]() {
         beginResetModel();
         m_cache.clear();
-        m_renderQueue.clear();
-        m_queuedPages.clear();
-        m_renderTimer->stop();
+        invalidateRenders();
         endResetModel();
     });
+}
+
+void ThumbnailModel::setRenderSource(const QString &path, const QString &password)
+{
+    m_renderSourcePath = path;
+    m_renderPassword = password;
+
+    // Work queued against the old file is dropped. Pages that were waiting
+    // get a repaint, which makes the view ask for them again.
+    const QSet<int> waiting = m_queuedPages;
+    invalidateRenders();
+    for (int page : waiting) {
+        if (page >= 0 && page < rowCount())
+            emit dataChanged(index(page), index(page), { Qt::DecorationRole });
+    }
 }
 
 void ThumbnailModel::setPageRenderDocument(QPdfDocument *document,
                                            const QList<int> &changedPages)
 {
-    m_pageRenderDocument = document;
+    m_pageRenderDocument = document;   // no longer used for rendering
     if (changedPages.isEmpty()) {
         m_cache.clear();
-        m_renderQueue.clear();
-        m_queuedPages.clear();
-        m_renderTimer->stop();
+        invalidateRenders();
         return;
     }
 
@@ -76,6 +82,100 @@ void ThumbnailModel::setPageRenderDocument(QPdfDocument *document,
             continue;
         m_cache.remove(page);
         emit dataChanged(index(page), index(page), { Qt::DecorationRole });
+    }
+}
+
+void ThumbnailModel::invalidateRenders()
+{
+    ++m_renderGeneration;
+    m_renderPool.clear();
+    m_inFlight = 0;
+    m_renderTimer->stop();
+    m_renderQueue.clear();
+    m_queuedPages.clear();
+}
+
+void ThumbnailModel::dispatchRenders()
+{
+    if (m_renderSourcePath.isEmpty())
+        return;
+
+    while (m_inFlight < kMaxInFlight && !m_renderQueue.isEmpty()) {
+        const int page = m_renderQueue.takeLast();
+        if (m_cache.object(page)) {
+            m_queuedPages.remove(page);
+            continue;
+        }
+
+        ++m_inFlight;
+        const quint64 generation = m_renderGeneration;
+        const QString path = m_renderSourcePath;
+        const QString password = m_renderPassword;
+
+        m_renderPool.start(QRunnable::create(
+            [this, page, generation, path, password]() {
+                // One parsed document per worker thread; the pool has one thread.
+                thread_local RenderDocumentCache renderDocuments;
+
+                QImage thumbnail;
+                QString error;
+                if (QPdfDocument *document =
+                        renderDocuments.document(path, password, &error)) {
+                    if (page < 0 || page >= document->pageCount()) {
+                        error = QStringLiteral("Page is out of range.");
+                    } else {
+                        const QSizeF pts = document->pagePointSize(page);
+                        if (pts.isEmpty()) {
+                            error = QStringLiteral("Page has no size.");
+                        } else {
+                            const qreal scale = qMin(kThumbWidth / pts.width(),
+                                                     kThumbHeight / pts.height());
+                            const QSize size(qMax(1, int(pts.width() * scale)),
+                                             qMax(1, int(pts.height() * scale)));
+
+                            QPdfDocumentRenderOptions options;
+                            options.setRenderFlags(
+                                QPdfDocumentRenderOptions::RenderFlag::Annotations);
+                            const QImage rendered = document->render(page, size, options);
+                            if (rendered.isNull()) {
+                                error = QStringLiteral("Renderer returned an empty image.");
+                            } else {
+                                thumbnail = QImage(rendered.size(), QImage::Format_RGB32);
+                                thumbnail.fill(Qt::white);
+                                QPainter painter(&thumbnail);
+                                painter.drawImage(0, 0, rendered);
+                                painter.end();
+                            }
+                        }
+                    }
+                }
+
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, page, generation, thumbnail = std::move(thumbnail),
+                     error = std::move(error)]() {
+                        if (generation != m_renderGeneration)
+                            return;
+                        --m_inFlight;
+                        m_queuedPages.remove(page);
+
+                        if (page >= 0 && page < rowCount()) {
+                            if (!error.isEmpty()) {
+                                qWarning().noquote()
+                                    << QStringLiteral("Could not render thumbnail %1: %2")
+                                           .arg(page + 1).arg(error);
+                            }
+                            m_cache.insert(
+                                page, new QPixmap(thumbnail.isNull()
+                                                      ? QPixmap()
+                                                      : QPixmap::fromImage(thumbnail)));
+                            emit dataChanged(index(page), index(page),
+                                             { Qt::DecorationRole });
+                        }
+                        dispatchRenders();
+                    },
+                    Qt::QueuedConnection);
+            }));
     }
 }
 
@@ -120,31 +220,6 @@ QVariant ThumbnailModel::data(const QModelIndex &index, int role) const
     }
 
     return {};
-}
-
-QPixmap ThumbnailModel::renderThumbnail(int page) const
-{
-    QPdfDocument *source = m_pageRenderDocument
-                                   && m_pageRenderDocument->status() == QPdfDocument::Status::Ready
-                               ? m_pageRenderDocument
-                               : m_document;
-    const QSizeF pts = source->pagePointSize(page);
-    const qreal scale = qMin(kThumbWidth / pts.width(), kThumbHeight / pts.height());
-    const QSize size(qMax(1, int(pts.width() * scale)),
-                     qMax(1, int(pts.height() * scale)));
-
-    QPdfDocumentRenderOptions options;
-    options.setRenderFlags(QPdfDocumentRenderOptions::RenderFlag::Annotations);
-    const QImage rendered = source->render(page, size, options);
-
-    QImage canvas(rendered.size(), QImage::Format_RGB32);
-    canvas.fill(Qt::white);
-
-    QPainter painter(&canvas);
-    painter.drawImage(0, 0, rendered);
-    painter.end();
-
-    return QPixmap::fromImage(canvas);
 }
 
 Qt::ItemFlags ThumbnailModel::flags(const QModelIndex &index) const

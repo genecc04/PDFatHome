@@ -43,6 +43,11 @@ void ThumbnailPane::setPageRenderDocument(QPdfDocument *document,
     m_model->setPageRenderDocument(document, changedPages);
 }
 
+void ThumbnailPane::setRenderSource(const QString &path, const QString &password)
+{
+    m_model->setRenderSource(path, password);
+}
+
 void ThumbnailPane::setCurrentPage(int page)
 {
     const QModelIndex index = m_model->index(page);

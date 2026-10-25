@@ -4,6 +4,7 @@
 #include <QQueue>
 #include <QPixmap>
 #include <QSet>
+#include <QThreadPool>
 
 class QMimeData;
 class QPdfDocument;
@@ -16,6 +17,8 @@ public:
     static constexpr int kThumbWidth = 120;
     static constexpr int kThumbHeight = 170;
     static inline const QString kPageMimeType = QStringLiteral("application/x-pdfapp-page");
+    ~ThumbnailModel() override;
+    void setRenderSource(const QString &path, const QString &password);
 
     explicit ThumbnailModel(QObject *parent = nullptr);
 
@@ -33,7 +36,14 @@ public:
     QMimeData *mimeData(const QModelIndexList &indexes) const override;
 
 private:
-    QPixmap renderThumbnail(int page) const;
+    void dispatchRenders();
+    void invalidateRenders();
+
+    QThreadPool m_renderPool;
+    QString m_renderSourcePath;
+    QString m_renderPassword;
+    quint64 m_renderGeneration = 0;
+    int m_inFlight = 0;
 
     QPdfDocument *m_document = nullptr;
     QPdfDocument *m_pageRenderDocument = nullptr;

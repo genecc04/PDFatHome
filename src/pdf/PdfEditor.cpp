@@ -5,6 +5,7 @@
 #include <vector>
 #include <cstring>
 #include <utility>
+#include <cmath>
 
 extern "C" {
 #include <mupdf/fitz.h>
@@ -101,69 +102,157 @@ bool isAppTextAnnotation(fz_context *ctx, pdf_annot *annot)
     return name && QByteArray(name).startsWith("OfflinePdfReaderText:");
 }
 
-bool inkStrokeIntersectsPath(fz_context *ctx, pdf_annot *annot, int stroke,
-                             const QVector<LineSegment> &pathSegments,
-                             const QRectF &pathBounds, double radius)
+bool pageHasWidgetAnnots(fz_context *ctx, pdf_document *doc, int pageIndex)
 {
-    const double borderWidth = pdf_annot_border_width(ctx, annot);
-    const double hitRadius = radius + qMax(0.0, borderWidth) / 2.0;
-    const double hitRadiusSquared = hitRadius * hitRadius;
-    const int vertexCount = pdf_annot_ink_list_stroke_count(ctx, annot, stroke);
-    if (vertexCount <= 0)
-        return false;
-
-    const double left = pathBounds.left() - hitRadius;
-    const double top = pathBounds.top() - hitRadius;
-    const double right = pathBounds.right() + hitRadius;
-    const double bottom = pathBounds.bottom() + hitRadius;
-    const QRectF expandedPathBounds(QPointF(left, top), QPointF(right, bottom));
-
-    fz_point firstVertex = pdf_annot_ink_list_stroke_vertex(ctx, annot, stroke, 0);
-    double minX = firstVertex.x;
-    double maxX = firstVertex.x;
-    double minY = firstVertex.y;
-    double maxY = firstVertex.y;
-    for (int vertex = 1; vertex < vertexCount; ++vertex) {
-        const fz_point point = pdf_annot_ink_list_stroke_vertex(ctx, annot, stroke, vertex);
-        minX = qMin(minX, double(point.x));
-        maxX = qMax(maxX, double(point.x));
-        minY = qMin(minY, double(point.y));
-        maxY = qMax(maxY, double(point.y));
+    pdf_obj *pageObj = pdf_lookup_page_obj(ctx, doc, pageIndex);
+    pdf_obj *annots = pdf_dict_get(ctx, pageObj, PDF_NAME(Annots));
+    const int count = pdf_array_len(ctx, annots);
+    for (int i = 0; i < count; ++i) {
+        pdf_obj *subtype = pdf_dict_get(ctx, pdf_array_get(ctx, annots, i),
+                                        PDF_NAME(Subtype));
+        if (pdf_name_eq(ctx, subtype, PDF_NAME(Widget)))
+            return true;
     }
-    if (!boundsIntersect(QRectF(QPointF(minX, minY), QPointF(maxX, maxY)),
-                         expandedPathBounds))
-        return false;
+    return false;
+}
 
-    if (vertexCount == 1) {
-        const QPointF point(firstVertex.x, firstVertex.y);
-        const QRectF inkBounds = segmentBounds(point, point);
-        for (const LineSegment &pathSegment : pathSegments) {
-            if (!boundsIntersect(inkBounds, pathSegment.bounds.adjusted(
-                    -hitRadius, -hitRadius, hitRadius, hitRadius)))
-                continue;
-            if (pointSegmentDistanceSquared(point, pathSegment.start, pathSegment.end)
-                <= hitRadiusSquared)
-                return true;
+class ErasePathIndex
+{
+public:
+    explicit ErasePathIndex(QVector<LineSegment> segments)
+        : m_segments(std::move(segments))
+        , m_lastQuery(m_segments.size(), quint32(0))
+    {
+        if (!m_segments.isEmpty()) {
+            double left = m_segments.first().bounds.left();
+            double top = m_segments.first().bounds.top();
+            double right = m_segments.first().bounds.right();
+            double bottom = m_segments.first().bounds.bottom();
+            for (const LineSegment &segment : std::as_const(m_segments)) {
+                left = qMin(left, segment.bounds.left());
+                top = qMin(top, segment.bounds.top());
+                right = qMax(right, segment.bounds.right());
+                bottom = qMax(bottom, segment.bounds.bottom());
+            }
+            m_bounds = QRectF(QPointF(left, top), QPointF(right, bottom));
         }
-        return false;
+
+        m_cells = qBound(1, 2 * int(std::sqrt(double(m_segments.size()))), kMaxCells);
+        m_cellWidth = qMax(m_bounds.width() / m_cells, 1e-6);
+        m_cellHeight = qMax(m_bounds.height() / m_cells, 1e-6);
+        m_grid.resize(m_cells * m_cells);
+
+        for (int i = 0; i < m_segments.size(); ++i) {
+            const QRectF &b = m_segments.at(i).bounds;
+            const int x0 = cellX(b.left());
+            const int x1 = cellX(b.right());
+            const int y0 = cellY(b.top());
+            const int y1 = cellY(b.bottom());
+            for (int y = y0; y <= y1; ++y) {
+                for (int x = x0; x <= x1; ++x)
+                    m_grid[y * m_cells + x].append(i);
+            }
+        }
     }
 
-    for (int vertex = 1; vertex < vertexCount; ++vertex) {
-        const fz_point previous = pdf_annot_ink_list_stroke_vertex(
-            ctx, annot, stroke, vertex - 1);
-        const fz_point current = pdf_annot_ink_list_stroke_vertex(ctx, annot, stroke, vertex);
-        const QPointF inkStart(previous.x, previous.y);
-        const QPointF inkEnd(current.x, current.y);
-        const QRectF inkBounds = segmentBounds(inkStart, inkEnd);
-        const QRectF expandedInkBounds = inkBounds.adjusted(
+    const QRectF &bounds() const { return m_bounds; }
+
+    bool hits(const QPointF &a, const QPointF &b, double hitRadius,
+              double hitRadiusSquared)
+    {
+        const QRectF query = segmentBounds(a, b).adjusted(
             -hitRadius, -hitRadius, hitRadius, hitRadius);
-        for (const LineSegment &pathSegment : pathSegments) {
-            if (!boundsIntersect(expandedInkBounds, pathSegment.bounds))
-                continue;
-            if (segmentDistanceSquared(pathSegment.start, pathSegment.end,
-                                       inkStart, inkEnd) <= hitRadiusSquared)
-                return true;
+        ++m_queryId;
+        const int x0 = cellX(query.left());
+        const int x1 = cellX(query.right());
+        const int y0 = cellY(query.top());
+        const int y1 = cellY(query.bottom());
+        for (int y = y0; y <= y1; ++y) {
+            for (int x = x0; x <= x1; ++x) {
+                for (int index : m_grid.at(y * m_cells + x)) {
+                    // A long path segment sits in several cells; test it once.
+                    if (m_lastQuery[index] == m_queryId)
+                        continue;
+                    m_lastQuery[index] = m_queryId;
+
+                    const LineSegment &segment = m_segments.at(index);
+                    if (!boundsIntersect(query, segment.bounds))
+                        continue;
+                    if (segmentDistanceSquared(segment.start, segment.end, a, b)
+                        <= hitRadiusSquared)
+                        return true;
+                }
+            }
         }
+        return false;
+    }
+
+private:
+    static constexpr int kMaxCells = 64;
+
+    int cellIndex(double position) const
+    {
+        if (!(position > 0.0))
+            return 0;
+        if (position >= m_cells - 1)
+            return m_cells - 1;
+        return int(position);
+    }
+    int cellX(double x) const { return cellIndex((x - m_bounds.left()) / m_cellWidth); }
+    int cellY(double y) const { return cellIndex((y - m_bounds.top()) / m_cellHeight); }
+
+    QVector<LineSegment> m_segments;
+    QVector<quint32> m_lastQuery;
+    QVector<QVector<int>> m_grid;
+    QRectF m_bounds;
+    int m_cells = 1;
+    double m_cellWidth = 1.0;
+    double m_cellHeight = 1.0;
+    quint32 m_queryId = 0;
+};
+
+void readInkStroke(fz_context *ctx, pdf_annot *annot, int stroke,
+                   std::vector<fz_point> &out)
+{
+    const int vertexCount = pdf_annot_ink_list_stroke_count(ctx, annot, stroke);
+    out.clear();
+    if (vertexCount > 0)
+        out.reserve(size_t(vertexCount));
+    for (int vertex = 0; vertex < vertexCount; ++vertex)
+        out.push_back(pdf_annot_ink_list_stroke_vertex(ctx, annot, stroke, vertex));
+}
+
+bool strokeHitsPath(const std::vector<fz_point> &vertices, ErasePathIndex &path,
+                    double hitRadius)
+{
+    if (vertices.empty())
+        return false;
+
+    double minX = vertices.front().x;
+    double maxX = minX;
+    double minY = vertices.front().y;
+    double maxY = minY;
+    for (size_t i = 1; i < vertices.size(); ++i) {
+        minX = qMin(minX, double(vertices[i].x));
+        maxX = qMax(maxX, double(vertices[i].x));
+        minY = qMin(minY, double(vertices[i].y));
+        maxY = qMax(maxY, double(vertices[i].y));
+    }
+    const QRectF expandedPath = path.bounds().adjusted(
+        -hitRadius, -hitRadius, hitRadius, hitRadius);
+    if (!boundsIntersect(QRectF(QPointF(minX, minY), QPointF(maxX, maxY)), expandedPath))
+        return false;
+
+    const double hitRadiusSquared = hitRadius * hitRadius;
+    if (vertices.size() == 1) {
+        const QPointF point(vertices.front().x, vertices.front().y);
+        return path.hits(point, point, hitRadius, hitRadiusSquared);
+    }
+    for (size_t i = 1; i < vertices.size(); ++i) {
+        const QPointF start(vertices[i - 1].x, vertices[i - 1].y);
+        const QPointF end(vertices[i].x, vertices[i].y);
+        if (path.hits(start, end, hitRadius, hitRadiusSquared))
+            return true;
     }
     return false;
 }
@@ -506,7 +595,6 @@ bool PdfEditor::highlightText(const QString &text, QList<int> *changedPages)
                          pageIndex + 1, kMaxHitsPerPage);
             }
             if (hits > 0) {
-                // One yellow highlight per page, covering every match on it.
                 pdf_annot *annot = pdf_create_annot(m_ctx, page, PDF_ANNOT_HIGHLIGHT);
                 const float yellow[3] = { 1.0f, 0.92f, 0.0f };
                 pdf_set_annot_color(m_ctx, annot, 3, yellow);
@@ -541,7 +629,6 @@ bool PdfEditor::bakeAnnotations()
 
     fz_try(m_ctx)
     {
-        // Draw annotations into the page content (form fields are left alone).
         pdf_bake_document(m_ctx, m_doc, 1, 0);
     }
     fz_catch(m_ctx)
@@ -903,7 +990,7 @@ bool PdfEditor::addInkStroke(int pageIndex, const QVector<QPointF> &points,
         pdf_set_annot_border(m_ctx, annot, float(width));
         pdf_set_annot_opacity(m_ctx, annot, float(opacity));
         pdf_add_annot_ink_list(m_ctx, annot, count, stroke.data());
-        pdf_update_annot(m_ctx, annot);   // builds how the stroke looks
+        pdf_update_annot(m_ctx, annot);
     }
     fz_always(m_ctx)
     {
@@ -993,27 +1080,25 @@ bool PdfEditor::eraseInk(int pageIndex, const QVector<QPointF> &path, double rad
     }
 
     QVector<LineSegment> pathSegments;
-    pathSegments.reserve(qMax(1, path.size() - 1));
-    QRectF pathBounds;
     if (path.size() == 1) {
-        pathBounds = QRectF(path.first(), path.first());
-        pathSegments.append({ path.first(), path.first(), pathBounds });
+        pathSegments.append({ path.first(), path.first(),
+                              segmentBounds(path.first(), path.first()) });
     } else {
-        pathBounds = QRectF(path.first(), path.first());
+        pathSegments.reserve(path.size() - 1);
         for (int point = 1; point < path.size(); ++point) {
             const QPointF start = path.at(point - 1);
             const QPointF end = path.at(point);
-            const QRectF bounds = segmentBounds(start, end);
-            pathBounds |= bounds;
-            pathSegments.append({ start, end, bounds });
+            pathSegments.append({ start, end, segmentBounds(start, end) });
         }
     }
+    ErasePathIndex erasePath(std::move(pathSegments));
 
     pdf_page *page = nullptr;
     pdf_annot *annot = nullptr;
     pdf_annot *next = nullptr;
     int count = 0;
     int removed = 0;
+    std::vector<fz_point> vertices;
     std::vector<int> keptStrokeCounts;
     std::vector<fz_point> keptVertices;
     fz_var(page);
@@ -1021,6 +1106,7 @@ bool PdfEditor::eraseInk(int pageIndex, const QVector<QPointF> &path, double rad
     fz_var(next);
     fz_var(count);
     fz_var(removed);
+    fz_var(vertices);
     fz_var(keptStrokeCounts);
     fz_var(keptVertices);
 
@@ -1039,22 +1125,22 @@ bool PdfEditor::eraseInk(int pageIndex, const QVector<QPointF> &path, double rad
             keptStrokeCounts.clear();
             keptVertices.clear();
             int removedFromAnnotation = 0;
+
+            const double hitRadius =
+                radius + qMax(0.0, double(pdf_annot_border_width(m_ctx, annot))) / 2.0;
+
             const int strokeCount = pdf_annot_ink_list_count(m_ctx, annot);
             for (int stroke = 0; stroke < strokeCount; ++stroke) {
-                const int vertexCount = pdf_annot_ink_list_stroke_count(
-                    m_ctx, annot, stroke);
-                if (inkStrokeIntersectsPath(
-                        m_ctx, annot, stroke, pathSegments, pathBounds, radius)) {
+                readInkStroke(m_ctx, annot, stroke, vertices);
+                if (strokeHitsPath(vertices, erasePath, hitRadius)) {
                     ++removedFromAnnotation;
                     continue;
                 }
-                if (vertexCount <= 0)
+                if (vertices.empty())
                     continue;
 
-                keptStrokeCounts.push_back(vertexCount);
-                for (int vertex = 0; vertex < vertexCount; ++vertex)
-                    keptVertices.push_back(pdf_annot_ink_list_stroke_vertex(
-                        m_ctx, annot, stroke, vertex));
+                keptStrokeCounts.push_back(int(vertices.size()));
+                keptVertices.insert(keptVertices.end(), vertices.begin(), vertices.end());
             }
 
             if (removedFromAnnotation == 0)
@@ -1151,6 +1237,20 @@ bool PdfEditor::formFieldsOnPage(int pageIndex, QVector<FormField> *fields)
         return false;
     }
     fields->clear();
+    
+    bool hasWidgets = true;
+    fz_var(hasWidgets);
+    fz_try(m_ctx)
+    {
+        hasWidgets = pageHasWidgetAnnots(m_ctx, m_doc, pageIndex);
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return false;
+    }
+    if (!hasWidgets)
+        return true;
 
     pdf_page *page = nullptr;
     char *fieldName = nullptr;

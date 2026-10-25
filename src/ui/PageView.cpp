@@ -1,4 +1,5 @@
 #include "PageView.h"
+#include "RenderDocumentCache.h"
 
 #include <QAbstractItemModel>
 #include <QApplication>
@@ -35,6 +36,11 @@
 #include <QTimer>
 #include <QWheelEvent>
 #include <QtMath>
+#include <QBuffer>
+#include <QDateTime>
+#include <QFile>
+#include <QFileInfo>
+#include <memory>
 
 #include <algorithm>
 #include <limits>
@@ -783,47 +789,26 @@ QPixmap PageView::pageImage(int page, const QSize &size, qreal dpr,
         const QString sourcePath = m_renderSourcePath;
         const QString password = m_renderPassword;
         const QSize renderSize = size * dpr;
+        const int priority = -qAbs(page - m_currentPage);
         m_renderPool.start(new FunctionRunnable(
             [this, page, key, generation, sourcePath, password, renderSize,
              dpr, includeAnnotations]() {
+                thread_local RenderDocumentCache renderDocuments;
+
                 QImage image;
                 QString error;
-                QPdfDocument document;
-                document.setPassword(password);
-                const QPdfDocument::Error loadError = document.load(sourcePath);
-                if (loadError != QPdfDocument::Error::None) {
-                    error = QStringLiteral("Could not load PDF for background rendering (error %1).")
-                                .arg(int(loadError));
-                } else if (document.status() == QPdfDocument::Status::Loading) {
-                    QEventLoop loop;
-                    QTimer timeout;
-                    timeout.setSingleShot(true);
-                    QObject::connect(&document, &QPdfDocument::statusChanged,
-                                     &loop, [&document, &loop]() {
-                        if (document.status() != QPdfDocument::Status::Loading)
-                            loop.quit();
-                    });
-                    QObject::connect(&timeout, &QTimer::timeout,
-                                     &loop, &QEventLoop::quit);
-                    timeout.start(30000);
-                    if (document.status() == QPdfDocument::Status::Loading)
-                        loop.exec();
-                    if (document.status() != QPdfDocument::Status::Ready) {
-                        error = QStringLiteral("PDF did not become ready for background rendering.");
-                    }
-                }
-
-                if (error.isEmpty()) {
+                if (QPdfDocument *document =
+                        renderDocuments.document(sourcePath, password, &error)) {
                     QPdfDocumentRenderOptions options;
                     if (includeAnnotations) {
                         options.setRenderFlags(
                             QPdfDocumentRenderOptions::RenderFlag::Annotations);
-                    } else {
-                        options.setRenderFlags(QPdfDocumentRenderOptions::RenderFlags());
                     }
-                    image = document.render(page, renderSize, options);
+                    image = document->render(page, renderSize, options);
                     if (image.isNull())
                         error = QStringLiteral("PDF renderer returned an empty page image.");
+                    else
+                        image.convertTo(QImage::Format_ARGB32_Premultiplied);
                 }
 
                 QMetaObject::invokeMethod(
@@ -863,7 +848,7 @@ QPixmap PageView::pageImage(int page, const QSize &size, qreal dpr,
                         }
                     },
                     Qt::QueuedConnection);
-            }));
+            }), priority);
     }
 
     const QList<quint64> candidates = cache.keys();

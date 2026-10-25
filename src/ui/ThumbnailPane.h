@@ -15,6 +15,7 @@ public:
     void setDocument(QPdfDocument *document);
     void setPageRenderDocument(QPdfDocument *document,
                                const QList<int> &changedPages = {});
+    void setRenderSource(const QString &path, const QString &password);
     void setCurrentPage(int page);
     void setReorderEnabled(bool enabled);
 

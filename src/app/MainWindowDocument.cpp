@@ -187,6 +187,7 @@ void MainWindow::loadDocument(const QString &path)
     m_currentPath = path;
     m_password = usedPassword;
     m_view->setRenderSource(path, m_password);
+    m_thumbnails->setRenderSource(path, m_password);
     m_passwordChange = PasswordChange::None;
     m_newPassword.clear();
     m_displayName = QFileInfo(path).fileName();
@@ -274,6 +275,7 @@ bool MainWindow::showFile(const QString &path, int page, bool reportErrors)
         return false;
     }
     m_view->setRenderSource(path, m_password);
+    m_thumbnails->setRenderSource(path, m_password);
 
     const int pageCount = m_document->pageCount();
     if (pageCount <= 0) {
@@ -565,6 +567,7 @@ bool MainWindow::refreshAfterPageEdit(const QList<int> &changedPages, int page)
     } else {
         m_view->setPageRenderDocument(m_pageRenderDocument, pages);
         m_view->setRenderSource(newPath, m_password);
+        m_thumbnails->setRenderSource(newPath, m_password);
         m_thumbnails->setPageRenderDocument(m_pageRenderDocument, pages);
     }
 

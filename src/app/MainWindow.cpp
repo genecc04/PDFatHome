@@ -301,7 +301,10 @@ bool MainWindow::refreshFormFieldOverlays()
         || m_document->status() != QPdfDocument::Status::Ready)
         return false;
 
-    for (int pageIndex = 0; pageIndex < m_document->pageCount(); ++pageIndex) {
+    m_view->clearFormFieldOverlays();
+
+    const int pageCount = m_document->pageCount();
+    for (int pageIndex = 0; pageIndex < pageCount; ++pageIndex) {
         QVector<PdfEditor::FormField> editorFields;
         if (!m_editor->formFieldsOnPage(pageIndex, &editorFields)) {
             QMessageBox::warning(this, "Form fields",
@@ -310,6 +313,9 @@ bool MainWindow::refreshFormFieldOverlays()
             m_view->clearFormFieldOverlays();
             return false;
         }
+        if (editorFields.isEmpty())
+            continue;
+
         QVector<PageView::FormField> viewFields;
         viewFields.reserve(editorFields.size());
         for (const PdfEditor::FormField &editorField : editorFields) {
