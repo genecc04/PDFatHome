@@ -5,6 +5,7 @@
 #include <QStringList>
 #include <QTemporaryDir>
 #include <QThreadPool>
+#include <atomic>
 #include <memory>
 
 #include "EditHistory.h"
@@ -151,6 +152,7 @@ private:
     QAction *m_removePasswordAction = nullptr;
 
     std::unique_ptr<PdfEditor> m_editor;
+    std::atomic_bool m_closing{false};
     QThreadPool m_documentLoadPool;
     bool m_documentLoadPending = false;
     EditHistory m_history;

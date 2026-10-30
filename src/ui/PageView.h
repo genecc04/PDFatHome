@@ -69,6 +69,7 @@ public:
     };
 
     explicit PageView(QWidget *parent = nullptr);
+    ~PageView() override;
 
     void setDocument(QPdfDocument *document);
     void setLoading(bool loading);

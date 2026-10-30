@@ -208,6 +208,12 @@ PageView::PageView(QWidget *parent)
     });
 }
 
+PageView::~PageView()
+{
+    invalidatePendingPageRenders();
+    m_renderPool.waitForDone();
+}
+
 // document and zoom
 
 void PageView::setDocument(QPdfDocument *document)

@@ -159,6 +159,9 @@ void MainWindow::startDocumentLoad(const QString &path, const QString &password,
 {
     m_documentLoadPool.start(QRunnable::create(
         [this, path, password, firstAttempt, workingPath]() {
+            if (m_closing)
+                return;
+
             auto result = std::make_shared<DocumentLoadResult>();
 
             PdfEditor probe;
@@ -166,10 +169,14 @@ void MainWindow::startDocumentLoad(const QString &path, const QString &password,
                 result->error = probe.lastError();
                 result->passwordRejected =
                     result->error == QStringLiteral("Incorrect or missing password");
+            } else if (m_closing) {
+                return;
             } else if (workingPath.isEmpty() || !QFile::copy(path, workingPath)) {
                 result->error = QStringLiteral("Could not create a working copy of the PDF.");
             } else {
                 result->workingCopyCreated = true;
+                if (m_closing)
+                    return;
                 auto editor = std::make_unique<PdfEditor>();
                 if (!editor->open(workingPath, password)) {
                     result->error = editor->lastError();
@@ -179,6 +186,8 @@ void MainWindow::startDocumentLoad(const QString &path, const QString &password,
                         result->formFields.resize(pages);
                         result->formFieldsLoaded = true;
                         for (int i = 0; i < pages; ++i) {
+                            if (m_closing)
+                                return;
                             if (!editor->formFieldsOnPage(i, &result->formFields[i])) {
                                 result->formFieldsLoaded = false;
                                 break;
@@ -189,6 +198,9 @@ void MainWindow::startDocumentLoad(const QString &path, const QString &password,
                 }
             }
 
+            if (m_closing)
+                return;
+
             if (result->workingCopyCreated) {
                 QPdfDocument sizeDocument;
                 sizeDocument.setPassword(password);
@@ -196,8 +208,11 @@ void MainWindow::startDocumentLoad(const QString &path, const QString &password,
                     && sizeDocument.status() == QPdfDocument::Status::Ready) {
                     const int count = sizeDocument.pageCount();
                     result->pageSizes.reserve(count);
-                    for (int i = 0; i < count; ++i)
+                    for (int i = 0; i < count; ++i) {
+                        if (m_closing)
+                            return;
                         result->pageSizes.append(sizeDocument.pagePointSize(i));
+                    }
                 }
             }
 
