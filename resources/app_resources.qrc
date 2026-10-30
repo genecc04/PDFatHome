@@ -1,6 +1,7 @@
 <RCC>
     <qresource prefix="/icons">
-        <file alias="pdfappicon.png">pdfappicon.png</file>
+        <file alias="pdfappicon.png">pdfappiconhd.png</file>
+        <file alias="loading64.png">loading64.png</file>
         <file alias="next.png">icons/next.png</file>
         <file alias="previous.png">icons/previous.png</file>
         <file alias="zoomin.png">icons/zoomin.png</file>

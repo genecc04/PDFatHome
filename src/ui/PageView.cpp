@@ -55,6 +55,12 @@ constexpr int kZoomUpdateIntervalMs = 75;
 constexpr double kMinZoom = 0.1;
 constexpr double kMaxZoom = 4.0;
 
+constexpr int kLoadingFrameSize = 64;
+constexpr int kLoadingDisplaySize = 256;
+constexpr int kLoadingFrameIntervalMs = 80;
+constexpr int kLoadingCardPadding = 12;
+constexpr int kLoadingTopMargin = 16;
+
 class FunctionRunnable final : public QRunnable
 {
 public:
@@ -167,6 +173,22 @@ PageView::PageView(QWidget *parent)
         setZoomFactor(m_pendingZoomFactor);
     });
 
+    m_loadingSprite.load(QStringLiteral(":/icons/loading64.png"));
+    if (m_loadingSprite.isNull()
+        || m_loadingSprite.height() != kLoadingFrameSize
+        || m_loadingSprite.width() % kLoadingFrameSize != 0) {
+        qWarning() << "Loading sprite must be a horizontal strip of 64x64 frames";
+        m_loadingSprite = QPixmap();
+    }
+
+    m_loadingTimer = new QTimer(this);
+    m_loadingTimer->setInterval(kLoadingFrameIntervalMs);
+    connect(m_loadingTimer, &QTimer::timeout, this, [this]() {
+        const int frames = qMax(1, m_loadingSprite.width() / kLoadingFrameSize);
+        m_loadingFrame = (m_loadingFrame + 1) % frames;
+        viewport()->update(loadingIndicatorRect());
+    });
+
     m_autoScroll = new QTimer(this);
     m_autoScroll->setInterval(30);
     connect(m_autoScroll, &QTimer::timeout, this, [this]() {
@@ -197,6 +219,61 @@ void PageView::setDocument(QPdfDocument *document)
                 [this]() { onDocumentChanged(); });
     }
     onDocumentChanged();
+}
+
+void PageView::setLoading(bool loading)
+{
+    if (m_loading == loading)
+        return;
+
+    m_loading = loading;
+    m_loadingFrame = 0;
+    if (loading && !m_loadingSprite.isNull())
+        m_loadingTimer->start();
+    else
+        m_loadingTimer->stop();
+
+    positionEmptyStateButton();
+    viewport()->update();
+}
+
+void PageView::stepLoading()
+{
+    if (!m_loading || m_loadingSprite.isNull())
+        return;
+
+    const int frames = qMax(1, m_loadingSprite.width() / kLoadingFrameSize);
+    m_loadingFrame = (m_loadingFrame + 1) % frames;
+    viewport()->repaint(loadingIndicatorRect());
+}
+
+void PageView::setPageSizeHint(const QVector<QSizeF> &sizes)
+{
+    m_pageSizeHint = sizes;
+}
+
+QRect PageView::loadingIndicatorRect() const
+{
+    const int side = kLoadingDisplaySize + 2 * kLoadingCardPadding;
+    return QRect((viewport()->width() - side) / 2, kLoadingTopMargin, side, side);
+}
+
+void PageView::drawLoadingIndicator(QPainter &painter)
+{
+    if (!m_loading || m_loadingSprite.isNull())
+        return;
+
+    const QRect card = loadingIndicatorRect();
+    const QRect target(card.x() + kLoadingCardPadding, card.y() + kLoadingCardPadding,
+                       kLoadingDisplaySize, kLoadingDisplaySize);
+    const QRect source(m_loadingFrame * kLoadingFrameSize, 0,
+                       kLoadingFrameSize, kLoadingFrameSize);
+
+    painter.save();
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, kLoadingDisplaySize < kLoadingFrameSize);
+    painter.drawPixmap(target, m_loadingSprite, source);
+    painter.restore();
 }
 
 void PageView::setRenderSource(const QString &path, const QString &password)
@@ -300,10 +377,14 @@ void PageView::onDocumentChanged()
 
     if (m_document && m_document->status() == QPdfDocument::Status::Ready) {
         const int count = m_document->pageCount();
-        m_pageSizes.reserve(count);
         m_pageLinkCaches.resize(count);
-        for (int i = 0; i < count; ++i)
-            m_pageSizes.append(m_document->pagePointSize(i));
+        if (m_pageSizeHint.size() == count) {
+            m_pageSizes = m_pageSizeHint;
+        } else {
+            m_pageSizes.reserve(count);
+            for (int i = 0; i < count; ++i)
+                m_pageSizes.append(m_document->pagePointSize(i));
+        }
     }
     recalculateLayout(false);
 }
@@ -325,8 +406,9 @@ void PageView::positionEmptyStateButton()
         (viewport()->width() - buttonSize.width()) / 2,
         viewport()->height() / 2 + 48,
         buttonSize.width(), buttonSize.height());
-    const bool loading = m_document
-                         && m_document->status() == QPdfDocument::Status::Loading;
+    const bool loading = m_loading
+                         || (m_document
+                             && m_document->status() == QPdfDocument::Status::Loading);
     m_emptyStateOpenButton->setVisible(m_pageRects.isEmpty() && !loading);
 }
 
@@ -480,7 +562,6 @@ void PageView::jumpToPage(int page, const QPointF &location)
     if (location.isNull()) {
         verticalScrollBar()->setValue(r.top() - kMargin);
     } else {
-        // Bring the spot a third of the way down the window.
         verticalScrollBar()->setValue(
             r.top() + int(location.y() * m_scale) - viewport()->height() / 3);
         horizontalScrollBar()->setValue(
@@ -621,7 +702,6 @@ QRect PageView::pageRectInViewport(int page) const
 
 QPointF PageView::pagePointFor(int page, const QPoint &viewportPos) const
 {
-    // Screen pixels to points on the page, kept inside the page.
     const QRect r = pageRectInViewport(page);
     const QSizeF size = m_pageSizes.at(page);
     return QPointF(qBound(0.0, (viewportPos.x() - r.x()) / m_scale, size.width()),
@@ -899,8 +979,9 @@ void PageView::drawStroke(QPainter &painter, const Stroke &stroke, const QRect &
 void PageView::paintEvent(QPaintEvent *event)
 {
     QPainter painter(viewport());
-    const bool loading = m_document
-                         && m_document->status() == QPdfDocument::Status::Loading;
+    const bool loading = m_loading
+                         || (m_document
+                             && m_document->status() == QPdfDocument::Status::Loading);
     if (m_pageRects.isEmpty()) {
         painter.fillRect(event->rect(), QColor(245, 247, 250));
         if (!loading) {
@@ -924,6 +1005,7 @@ void PageView::paintEvent(QPaintEvent *event)
             painter.drawText(hintRect, Qt::AlignHCenter | Qt::AlignVCenter,
                              QStringLiteral("Drag a PDF here or open one to get started"));
         }
+        drawLoadingIndicator(painter);
         return;
     }
     painter.fillRect(event->rect(), QColor(70, 70, 70));
@@ -1055,7 +1137,6 @@ void PageView::paintEvent(QPaintEvent *event)
         if (m_drawing && m_activeStroke.page == page)
             drawStroke(painter, m_activeStroke, target);
 
-        // An image being placed.
         if (m_imageActive && m_imagePage == page)
             drawImagePlacement(painter, target);
 
@@ -1078,6 +1159,8 @@ void PageView::paintEvent(QPaintEvent *event)
         painter.setBrush(QColor(0, 102, 204, 40));
         painter.drawRect(m_dragRect);
     }
+
+    drawLoadingIndicator(painter);
 }
 
 void PageView::resizeEvent(QResizeEvent *event)
@@ -1112,6 +1195,9 @@ void PageView::wheelEvent(QWheelEvent *event)
 
 void PageView::keyPressEvent(QKeyEvent *event)
 {
+    if (m_loading)
+        return;
+
     if (m_imageAwaiting || m_imageActive) {
         if (event->key() == Qt::Key_Escape) {
             finishImage(false);
@@ -1335,6 +1421,9 @@ void PageView::copySelection()
 
 void PageView::contextMenuEvent(QContextMenuEvent *event)
 {
+    if (m_loading)
+        return;
+
     if (m_textTool || m_drawTool || m_editor || m_imageAwaiting || m_imageActive)
         return;
 
@@ -1892,6 +1981,9 @@ bool PageView::hasPendingChanges() const
 
 void PageView::mousePressEvent(QMouseEvent *event)
 {
+    if (m_loading)
+        return;
+
     const QPoint pos = event->position().toPoint();
 
     if (m_formEditor)
@@ -2121,6 +2213,9 @@ void PageView::mousePressEvent(QMouseEvent *event)
 
 void PageView::mouseDoubleClickEvent(QMouseEvent *event)
 {
+    if (m_loading)
+        return;
+
     if (!m_textTool && !m_drawTool && event->button() == Qt::LeftButton) {
         const QPoint pos = event->position().toPoint();
         const int page = pageAtViewportPoint(pos);

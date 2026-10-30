@@ -4,6 +4,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
+#include <QThreadPool>
 #include <memory>
 
 #include "EditHistory.h"
@@ -37,6 +38,8 @@ protected:
     void dropEvent(QDropEvent *event) override;
 
 private:
+    struct DocumentLoadResult;
+
     // setup
     void setupViewer();
     void setupThumbnailPane();
@@ -50,6 +53,11 @@ private:
     // file and viewing
     void openFile();
     void loadDocument(const QString &path);
+    void startDocumentLoad(const QString &path, const QString &password,
+                           bool firstAttempt, const QString &workingPath);
+    void finishDocumentLoad(const QString &path, const QString &password,
+                            bool firstAttempt, const QString &workingPath,
+                            const std::shared_ptr<DocumentLoadResult> &result);
     bool save();
     bool saveAs();
     void goToPage(int page);
@@ -90,7 +98,8 @@ private:
     void placeImage(int page, const QRectF &box, const QImage &image);
     bool fillFormField(int page, const QPointF &point, PageView::FormField *field);
     bool commitFormField(int page, int widgetIndex, const QString &value);
-    bool refreshFormFieldOverlays();
+    bool refreshFormFieldOverlays(
+        const QVector<QVector<PdfEditor::FormField>> *prefetched = nullptr);
     void undo();
     void redo();
     void stepHistory(const QString &path);
@@ -142,6 +151,8 @@ private:
     QAction *m_removePasswordAction = nullptr;
 
     std::unique_ptr<PdfEditor> m_editor;
+    QThreadPool m_documentLoadPool;
+    bool m_documentLoadPending = false;
     EditHistory m_history;
     QTemporaryDir m_tempDir;
     QString m_currentPath;

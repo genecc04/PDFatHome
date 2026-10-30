@@ -55,6 +55,7 @@ public:
     bool deleteTextAnnotation(int pageIndex, int annotationId, const QString &text);
 
     bool open(const QString &path, const QString &password = QString());
+    int pageCount();
     enum class Encryption { Keep, Remove, Aes256 };
 
     bool saveAs(const QString &path, bool removeUnused = false,

@@ -170,7 +170,6 @@ public:
         for (int y = y0; y <= y1; ++y) {
             for (int x = x0; x <= x1; ++x) {
                 for (int index : m_grid.at(y * m_cells + x)) {
-                    // A long path segment sits in several cells; test it once.
                     if (m_lastQuery[index] == m_queryId)
                         continue;
                     m_lastQuery[index] = m_queryId;
@@ -311,6 +310,25 @@ bool PdfEditor::open(const QString &path, const QString &password)
 
     m_doc = doc;
     return true;
+}
+
+int PdfEditor::pageCount()
+{
+    if (!m_doc)
+        return -1;
+
+    int count = -1;
+    fz_var(count);
+    fz_try(m_ctx)
+    {
+        count = pdf_count_pages(m_ctx, m_doc);
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return -1;
+    }
+    return count;
 }
 
 bool PdfEditor::saveAs(const QString &path, bool removeUnused,

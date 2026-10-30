@@ -13,15 +13,30 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QMetaObject>
 #include <QMimeData>
 #include <QPdfDocument>
+#include <QRunnable>
 #include <QSettings>
 #include <QStatusBar>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
+#include <QThreadPool>
 #include <QTimer>
 #include <QUrl>
 #include <algorithm>
+#include <memory>
+
+struct MainWindow::DocumentLoadResult
+{
+    std::unique_ptr<PdfEditor> editor;
+    QString error;
+    bool passwordRejected = false;
+    bool workingCopyCreated = false;
+    QVector<QVector<PdfEditor::FormField>> formFields;
+    bool formFieldsLoaded = false;
+    QVector<QSizeF> pageSizes;
+};
 
 namespace {
 
@@ -99,6 +114,9 @@ namespace {
 
 void MainWindow::openFile()
 {
+    if (m_documentLoadPending)
+        return;
+
     if (!confirmDiscard())
         return;
 
@@ -112,6 +130,9 @@ void MainWindow::openFile()
 
 void MainWindow::openPath(const QString &path)
 {
+    if (m_documentLoadPending)
+        return;
+
     if (!confirmDiscard())
         return;
     loadDocument(path);
@@ -119,123 +140,162 @@ void MainWindow::openPath(const QString &path)
 
 void MainWindow::loadDocument(const QString &path)
 {
+    if (m_documentLoadPending)
+        return;
+
+    m_documentLoadPending = true;
     m_pendingPage = -1;
+    m_view->setLoading(true);
+    updateActions();
+
+    const QString workingPath = m_tempDir.isValid()
+        ? m_tempDir.filePath(QString("state-%1.pdf").arg(++m_editCount))
+        : QString();
+    startDocumentLoad(path, QString(), true, workingPath);
+}
+
+void MainWindow::startDocumentLoad(const QString &path, const QString &password,
+                                   bool firstAttempt, const QString &workingPath)
+{
+    m_documentLoadPool.start(QRunnable::create(
+        [this, path, password, firstAttempt, workingPath]() {
+            auto result = std::make_shared<DocumentLoadResult>();
+
+            PdfEditor probe;
+            if (!probe.open(path, password)) {
+                result->error = probe.lastError();
+                result->passwordRejected =
+                    result->error == QStringLiteral("Incorrect or missing password");
+            } else if (workingPath.isEmpty() || !QFile::copy(path, workingPath)) {
+                result->error = QStringLiteral("Could not create a working copy of the PDF.");
+            } else {
+                result->workingCopyCreated = true;
+                auto editor = std::make_unique<PdfEditor>();
+                if (!editor->open(workingPath, password)) {
+                    result->error = editor->lastError();
+                } else {
+                    const int pages = editor->pageCount();
+                    if (pages >= 0) {
+                        result->formFields.resize(pages);
+                        result->formFieldsLoaded = true;
+                        for (int i = 0; i < pages; ++i) {
+                            if (!editor->formFieldsOnPage(i, &result->formFields[i])) {
+                                result->formFieldsLoaded = false;
+                                break;
+                            }
+                        }
+                    }
+                    result->editor = std::move(editor);
+                }
+            }
+
+            if (result->workingCopyCreated) {
+                QPdfDocument sizeDocument;
+                sizeDocument.setPassword(password);
+                if (sizeDocument.load(workingPath) == QPdfDocument::Error::None
+                    && sizeDocument.status() == QPdfDocument::Status::Ready) {
+                    const int count = sizeDocument.pageCount();
+                    result->pageSizes.reserve(count);
+                    for (int i = 0; i < count; ++i)
+                        result->pageSizes.append(sizeDocument.pagePointSize(i));
+                }
+            }
+
+            QMetaObject::invokeMethod(
+                this,
+                [this, path, password, firstAttempt, workingPath, result]() {
+                    finishDocumentLoad(path, password, firstAttempt, workingPath, result);
+                },
+                Qt::QueuedConnection);
+        }));
+}
+
+void MainWindow::finishDocumentLoad(const QString &path, const QString &password,
+                                    bool firstAttempt, const QString &workingPath,
+                                    const std::shared_ptr<DocumentLoadResult> &result)
+{
+    auto endLoading = [this]() {
+        m_documentLoadPending = false;
+        m_view->setLoading(false);
+        updateActions();
+        updateTitle();
+    };
+
+    if (result->passwordRejected) {
+        m_view->setLoading(false);
+        bool ok = false;
+        const QString entered = QInputDialog::getText(
+            this, "Password required",
+            firstAttempt ? "This PDF is protected. Enter its password:"
+                         : "Incorrect password. Try again:",
+            QLineEdit::Password, QString(), &ok);
+        if (ok) {
+            m_view->setLoading(true);
+            startDocumentLoad(path, entered, false, workingPath);
+        } else {
+            endLoading();
+        }
+        return;
+    }
+
     const QString previousState = m_history.current();
     const int previousPage = m_view->currentPage();
-    auto restorePreviousDocument = [this, &previousState, previousPage]() {
-        if (previousState.isEmpty())
-            return;
-        if (!showFile(previousState, previousPage, false)) {
+    const QString previousPassword = m_password;
+    const QString working = result->workingCopyCreated ? workingPath : path;
+
+    m_password = password;
+    m_view->stepLoading();
+    m_view->setPageSizeHint(result->pageSizes);
+    const bool shown = showFile(working, 0, false);
+    m_view->setPageSizeHint(QVector<QSizeF>());
+    if (!shown) {
+        m_password = previousPassword;
+        if (!previousState.isEmpty() && !showFile(previousState, previousPage, false)) {
             QMessageBox::warning(
                 this, "Open failed",
                 "The new PDF could not be opened, and the previous PDF could not be "
                 "restored. Try reopening the previous file.");
         }
-    };
-
-    QString usedPassword;
-    auto authenticatedEditor = std::make_unique<PdfEditor>();
-    bool editorAvailable = authenticatedEditor->open(path);
-    QString editorOpenError = editorAvailable ? QString() : authenticatedEditor->lastError();
-    if (!editorAvailable && editorOpenError == QStringLiteral("Incorrect or missing password")) {
-        bool firstAttempt = true;
-        while (!editorAvailable) {
-            const QString prompt = firstAttempt
-                ? "This PDF is protected. Enter its password:"
-                : "Incorrect password. Try again:";
-            firstAttempt = false;
-
-            bool ok = false;
-            const QString password = QInputDialog::getText(
-                this, "Password required", prompt, QLineEdit::Password, QString(), &ok);
-            if (!ok) {
-                restorePreviousDocument();
-                updateTitle();
-                return;
-            }
-
-            auto candidateEditor = std::make_unique<PdfEditor>();
-            if (candidateEditor->open(path, password)) {
-                authenticatedEditor = std::move(candidateEditor);
-                editorAvailable = true;
-                usedPassword = password;
-            } else {
-                editorOpenError = candidateEditor->lastError();
-                editorAvailable = false;
-                if (editorOpenError != QStringLiteral("Incorrect or missing password"))
-                    break;
-            }
-        }
-    }
-
-    clearPageRenderDocument();
-    m_document->close();
-    m_document->setPassword(usedPassword);
-    QPdfDocument::Error error = m_document->load(path);
-
-    if (error != QPdfDocument::Error::None) {
-        restorePreviousDocument();
-        updateTitle();
+        if (result->workingCopyCreated)
+            removeTempFile(workingPath);
+        endLoading();
         QMessageBox::warning(this, "Error", "Could not open that PDF.");
         return;
     }
+
+    m_view->stepLoading();
 
     m_view->clearFormFieldOverlays();
     m_editor.reset();
     removeSnapshots(m_history.states());
     m_history.clear();
     m_currentPath = path;
-    m_password = usedPassword;
-    m_view->setRenderSource(path, m_password);
-    m_thumbnails->setRenderSource(path, m_password);
     m_passwordChange = PasswordChange::None;
     m_newPassword.clear();
     m_displayName = QFileInfo(path).fileName();
     addRecentFile(path);
-
-    QString working = path;
-    bool workingCopyCreated = false;
-    if (m_tempDir.isValid()) {
-        const QString copy = m_tempDir.filePath(
-            QString("state-%1.pdf").arg(++m_editCount));
-        if (QFile::copy(path, copy)) {
-            working = copy;
-            workingCopyCreated = true;
-        }
-    }
     m_history.reset(working);
-    if (editorAvailable) {
-        authenticatedEditor.reset();
-        if (workingCopyCreated) {
-            if (!showFile(working, 0)) {
-                editorAvailable = false;
-                editorOpenError = "Could not load the PDF working copy for display.";
-                showFile(path, 0, false);
-            } else {
-                m_editor = std::make_unique<PdfEditor>();
-                editorAvailable = m_editor->open(working, m_password);
-                if (editorAvailable)
-                    refreshFormFieldOverlays();
-                else
-                    editorOpenError = m_editor->lastError();
-            }
-        } else {
-            editorAvailable = false;
-            editorOpenError = "Could not create a working copy of the PDF.";
-        }
+    m_view->stepLoading();
+
+    if (result->editor) {
+        m_editor = std::move(result->editor);
+        if (result->formFieldsLoaded)
+            refreshFormFieldOverlays(&result->formFields);
+        else
+            refreshFormFieldOverlays();
     }
-    if (!editorAvailable) {
-        m_editor.reset();
+
+    const QString editorError = result->error;
+    endLoading();
+
+    if (!m_editor) {
         QMessageBox::warning(
             this, "Editing unavailable",
             "The PDF opened for viewing, but editing could not be started:\n\n"
-                + (editorOpenError.isEmpty()
+                + (editorError.isEmpty()
                        ? QStringLiteral("No error details were provided.")
-                       : editorOpenError));
+                       : editorError));
     }
-
-    updateActions();
-    updateTitle();
 }
 
 void MainWindow::goToPage(int page)

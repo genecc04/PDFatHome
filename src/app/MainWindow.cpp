@@ -23,6 +23,8 @@
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
+    m_documentLoadPool.setMaxThreadCount(1);
+
     setupViewer();
     setupThumbnailPane();
     setupSearchPane();
@@ -46,6 +48,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    m_documentLoadPool.waitForDone();   // the worker holds `this`; let it finish first
     m_editor.reset();
 
     if (m_view) {
@@ -126,7 +129,7 @@ void MainWindow::updateTitle()
 
 void MainWindow::updateActions()
 {
-    const bool editable = (m_editor != nullptr);
+    const bool editable = (m_editor != nullptr) && !m_documentLoadPending;
 
     m_saveAction->setEnabled(editable && isDocumentModified());
     m_setPasswordAction->setEnabled(editable);
@@ -295,7 +298,8 @@ bool MainWindow::openWorkingCopy(const QString &source, int page)
     return shown;
 }
 
-bool MainWindow::refreshFormFieldOverlays()
+bool MainWindow::refreshFormFieldOverlays(
+    const QVector<QVector<PdfEditor::FormField>> *prefetched)
 {
     if (!m_editor || !m_document
         || m_document->status() != QPdfDocument::Status::Ready)
@@ -306,7 +310,10 @@ bool MainWindow::refreshFormFieldOverlays()
     const int pageCount = m_document->pageCount();
     for (int pageIndex = 0; pageIndex < pageCount; ++pageIndex) {
         QVector<PdfEditor::FormField> editorFields;
-        if (!m_editor->formFieldsOnPage(pageIndex, &editorFields)) {
+        if (prefetched) {
+            if (pageIndex < prefetched->size())
+                editorFields = prefetched->at(pageIndex);
+        } else if (!m_editor->formFieldsOnPage(pageIndex, &editorFields)) {
             QMessageBox::warning(this, "Form fields",
                                  "Could not load form fields for display: "
                                      + m_editor->lastError());

@@ -71,6 +71,9 @@ public:
     explicit PageView(QWidget *parent = nullptr);
 
     void setDocument(QPdfDocument *document);
+    void setLoading(bool loading);
+    void setPageSizeHint(const QVector<QSizeF> &sizes);
+    void stepLoading();
     void setRenderSource(const QString &path, const QString &password = QString());
     void setPageRenderDocument(QPdfDocument *document,
                                const QList<int> &changedPages = {});
@@ -194,6 +197,8 @@ private:
     void recalculateLayout(bool keepPosition);
     double fitPageZoomFactor() const;
     void positionEmptyStateButton();
+    QRect loadingIndicatorRect() const;
+    void drawLoadingIndicator(QPainter &painter);
     void updateCurrentPage();
     int pageAtViewportPoint(const QPoint &point) const;
     const QList<QPdfLink> &linksOnPage(int page);
@@ -253,6 +258,10 @@ private:
     QPdfSearchModel *m_search = nullptr;
     QPushButton *m_emptyStateOpenButton = nullptr;
     QTimer *m_zoomTimer = nullptr;
+    QPixmap m_loadingSprite;
+    QTimer *m_loadingTimer = nullptr;
+    bool m_loading = false;
+    int m_loadingFrame = 0;
     int m_searchIndex = -1;
 
     ZoomMode m_zoomMode = ZoomMode::FitToWidth;
@@ -260,6 +269,7 @@ private:
     double m_pendingZoomFactor = 1.0;
     double m_scale = 1.0;
     QVector<QSizeF> m_pageSizes;
+    QVector<QSizeF> m_pageSizeHint;
     QVector<QRect> m_pageRects;
     QSize m_documentSize;
     int m_currentPage = 0;
