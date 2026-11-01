@@ -61,7 +61,7 @@ MainWindow::MainWindow(QWidget *parent)
 MainWindow::~MainWindow()
 {
     setBusyCursor(false);
-    m_documentLoadPool.waitForDone();   // the worker holds `this`; let it finish first
+    m_documentLoadPool.waitForDone();
     if (m_view) {
         m_view->invalidatePageRenders();
         m_view->setDocument(nullptr);
@@ -140,6 +140,9 @@ void MainWindow::updateActions()
     m_saveAction->setEnabled(editable && isDocumentModified());
     m_saveAsAction->setEnabled(editable);
     m_optimizeAction->setEnabled(editable);
+    m_redactAction->setEnabled(editable);
+    m_applyRedactionsAction->setEnabled(editable && m_view->hasRedactionAreas());
+    m_clearRedactionsAction->setEnabled(m_view->hasRedactionAreas());
     m_setPasswordAction->setEnabled(editable);
     m_removePasswordAction->setEnabled(editable && isPasswordProtected());
     m_extractAction->setEnabled(editable);
@@ -166,6 +169,8 @@ void MainWindow::updateActions()
     m_drawAction->setEnabled(editable);
     if ((!m_editor || m_documentLoadPending) && m_drawAction->isChecked())
         m_drawAction->setChecked(false);
+    if ((!m_editor || m_documentLoadPending) && m_redactAction->isChecked())
+        m_redactAction->setChecked(false);
 }
 
 void MainWindow::setBusyCursor(bool busy)

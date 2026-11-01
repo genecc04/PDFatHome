@@ -28,6 +28,9 @@ web links embedded in a PDF in your default browser after you confirm.
   so a failed save never costs you the original
 - Create a losslessly optimized PDF copy by compressing streams and removing unused
   or duplicate objects; images are not downsampled
+- Mark rectangular redaction areas and apply them to a separate PDF copy. Intersecting
+  text is removed, and intersecting images or vector drawings may be removed in full;
+  the original file is left unchanged
 - Export selected page ranges as 150-DPI PNG images or SVG files; multi-page
   exports are numbered
 
@@ -71,6 +74,7 @@ which most computers already have.
 | Highlight text | Ctrl+H |
 | Add text | Ctrl+T |
 | Draw | Ctrl+D |
+| Mark redaction areas | Ctrl+Shift+R |
 | Add image | Ctrl+I |
 | Zoom | Ctrl + mouse wheel |
 | Cancel what you are placing | Esc |
@@ -82,6 +86,10 @@ which most computers already have.
   cannot be edited.
 - **White-out only covers.** The text under it is still in the file, so search and
   copy still find it. Don't use it to hide anything sensitive.
+- **Redaction applies only to marked page content in the new copy.** It does not scrub
+  metadata, attachments, bookmarks, form values, or unmarked content. The original
+  remains unchanged. Inspect the output and verify that sensitive content is gone
+  before sharing it.
 - Added text uses only the standard PDF fonts Helvetica, Times, and Courier for
   cross-viewer compatibility.
 - Scanned PDFs have no text to select or search (there is no OCR).

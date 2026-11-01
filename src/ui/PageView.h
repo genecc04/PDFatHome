@@ -119,6 +119,10 @@ public:
 
     void setDrawToolActive(bool active);
     void setDrawStyle(const DrawStyle &style);
+    void setRedactionToolActive(bool active);
+    bool hasRedactionAreas() const { return !m_redactionAreas.isEmpty(); }
+    QVector<PdfEditor::RedactionArea> redactionAreas() const { return m_redactionAreas; }
+    void clearRedactionAreas();
     void setEraserActive(bool active);
     void setInkStrokeHandler(
         const std::function<bool(int, QVector<Stroke> *)> &handler);
@@ -166,6 +170,8 @@ signals:
     void imagePlaced(int page, const QRectF &boxPoints, const QImage &image);
     void imagePlacementStateChanged(bool active, bool positioned);
     void imageCropModeChanged(bool active);
+    void redactionAreasChanged(int count);
+    void redactionToolChanged(bool active);
     void textSelected();
     void openRequested();
     void externalLinkRequested(const QUrl &url);
@@ -384,6 +390,13 @@ private:
     std::function<bool(int, QVector<Stroke> *)> m_inkStrokeHandler;
     Stroke m_activeStroke;
     QVector<Stroke> m_strokes;
+
+    bool m_redactionTool = false;
+    bool m_redactionDrawing = false;
+    int m_redactionPage = -1;
+    QPointF m_redactionStart;
+    QRectF m_redactionPreview;
+    QVector<PdfEditor::RedactionArea> m_redactionAreas;
 
     // image placement
     QImage m_pendingImage;

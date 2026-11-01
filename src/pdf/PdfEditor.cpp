@@ -4,6 +4,7 @@
 
 #include <QByteArray>
 #include <QFileInfo>
+#include <QHash>
 #include <QUuid>
 #include <vector>
 #include <cstring>
@@ -902,6 +903,132 @@ bool PdfEditor::optimizeAs(const QString &path, Encryption encryption,
     fz_try(m_ctx)
     {
         pdf_save_document(m_ctx, m_doc, pathUtf8.constData(), &opts);
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return false;
+    }
+    return true;
+}
+
+bool PdfEditor::redactAs(const QString &path, const QVector<RedactionArea> &areas,
+                         Encryption encryption, const QString &password)
+{
+    m_error.clear();
+    if (!m_doc) {
+        m_error = "No document is open.";
+        return false;
+    }
+    if (areas.isEmpty()) {
+        m_error = "There are no redaction areas to apply.";
+        return false;
+    }
+
+    int pageCount = 0;
+    fz_try(m_ctx)
+    {
+        pageCount = pdf_count_pages(m_ctx, m_doc);
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return false;
+    }
+
+    QHash<int, QVector<QRectF>> areasByPage;
+    for (const RedactionArea &area : areas) {
+        const QRectF &bounds = area.bounds;
+        if (area.page < 0 || area.page >= pageCount
+            || !std::isfinite(bounds.x()) || !std::isfinite(bounds.y())
+            || !std::isfinite(bounds.width()) || !std::isfinite(bounds.height())
+            || qFuzzyIsNull(bounds.width()) || qFuzzyIsNull(bounds.height())) {
+            m_error = "A redaction area is invalid or refers to a page that does not exist.";
+            return false;
+        }
+        areasByPage[area.page].append(bounds.normalized());
+    }
+
+    clearSelectionTextCache();
+    for (auto it = areasByPage.cbegin(); it != areasByPage.cend(); ++it) {
+        pdf_page *page = nullptr;
+        pdf_annot *annot = nullptr;
+        fz_var(page);
+        fz_var(annot);
+        fz_try(m_ctx)
+        {
+            page = pdf_load_page(m_ctx, m_doc, it.key());
+            const fz_rect pageBounds = fz_bound_page(m_ctx, &page->super);
+            for (const QRectF &bounds : it.value()) {
+                fz_rect redactBounds = fz_make_rect(
+                    float(bounds.left()), float(bounds.top()),
+                    float(bounds.right()), float(bounds.bottom()));
+                redactBounds = fz_intersect_rect(redactBounds, pageBounds);
+                if (fz_is_empty_rect(redactBounds))
+                    fz_throw(m_ctx, FZ_ERROR_GENERIC,
+                             "A redaction area is outside page %d.", it.key() + 1);
+
+                annot = pdf_create_annot(m_ctx, page, PDF_ANNOT_REDACT);
+                pdf_set_annot_rect(m_ctx, annot, redactBounds);
+                pdf_update_annot(m_ctx, annot);
+                pdf_drop_annot(m_ctx, annot);
+                annot = nullptr;
+            }
+
+            pdf_redact_options options = {};
+            options.black_boxes = 1;
+            options.image_method = PDF_REDACT_IMAGE_REMOVE;
+            options.line_art = PDF_REDACT_LINE_ART_REMOVE_IF_TOUCHED;
+            options.text = PDF_REDACT_TEXT_REMOVE;
+            pdf_redact_page(m_ctx, m_doc, page, &options);
+        }
+        fz_always(m_ctx)
+        {
+            if (annot)
+                pdf_drop_annot(m_ctx, annot);
+            if (page)
+                fz_drop_page(m_ctx, &page->super);
+        }
+        fz_catch(m_ctx)
+        {
+            m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+            return false;
+        }
+    }
+
+    const QByteArray pathUtf8 = path.toUtf8();
+    const QByteArray passUtf8 = password.toUtf8();
+    pdf_write_options options = pdf_default_write_options;
+    options.do_garbage = 3;
+    options.do_compress = 1;
+    options.do_compress_images = 1;
+    options.do_compress_fonts = 1;
+
+    switch (encryption) {
+    case Encryption::Keep:
+        break;
+    case Encryption::Remove:
+        options.do_encrypt = PDF_ENCRYPT_NONE;
+        break;
+    case Encryption::Aes256:
+        if (passUtf8.isEmpty() || passUtf8.size() >= int(sizeof(options.upwd_utf8))) {
+            m_error = "The password must be between 1 and 127 characters.";
+            return false;
+        }
+        options.do_encrypt = PDF_ENCRYPT_AES_256;
+        options.permissions = -1;
+        std::memset(options.upwd_utf8, 0, sizeof(options.upwd_utf8));
+        std::memset(options.opwd_utf8, 0, sizeof(options.opwd_utf8));
+        std::memcpy(options.upwd_utf8, passUtf8.constData(),
+                    size_t(passUtf8.size()));
+        std::memcpy(options.opwd_utf8, passUtf8.constData(),
+                    size_t(passUtf8.size()));
+        break;
+    }
+
+    fz_try(m_ctx)
+    {
+        pdf_save_document(m_ctx, m_doc, pathUtf8.constData(), &options);
     }
     fz_catch(m_ctx)
     {

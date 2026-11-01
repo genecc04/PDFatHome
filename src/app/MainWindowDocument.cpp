@@ -567,6 +567,55 @@ void MainWindow::optimizePdf()
         6000);
 }
 
+void MainWindow::applyRedactions()
+{
+    m_view->commitPendingEdits();
+    if (!m_editor || !m_view->hasRedactionAreas())
+        return;
+
+    const auto answer = QMessageBox::warning(
+        this, "Apply redactions to a copy",
+        "This creates a separate redacted PDF copy; the original remains unchanged and still "
+        "contains the unredacted content.\n\n"
+        "Content overlapping the marked areas will be removed. An intersecting image or "
+        "vector drawing may be removed in full. This operation does not scrub document "
+        "metadata, attachments, bookmarks, form values, or other unmarked content.\n\n"
+        "Inspect the output and verify it with search and copy before sharing. Continue?",
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+        return;
+
+    const QString defaultName =
+        QFileInfo(m_currentPath).completeBaseName() + "-redacted.pdf";
+    const QString dest = QFileDialog::getSaveFileName(
+        this, "Save redacted PDF copy", defaultName, "PDF files (*.pdf)");
+    if (dest.isEmpty())
+        return;
+
+    if (QFileInfo(dest) == QFileInfo(m_currentPath)
+        || QFileInfo(dest) == QFileInfo(m_history.current())) {
+        QMessageBox::warning(this, "Apply redactions",
+                             "Choose a different file name to keep the original unchanged.");
+        return;
+    }
+
+    const QVector<PdfEditor::RedactionArea> areas = m_view->redactionAreas();
+    EditOperationGuard operation(this);
+    PdfEditor redactor;
+    if (!redactor.open(m_history.current(), m_password)
+        || !redactor.redactAs(dest, areas, saveEncryption(), m_newPassword)) {
+        QMessageBox::warning(this, "Redaction failed", redactor.lastError());
+        return;
+    }
+
+    m_view->clearRedactionAreas();
+    m_redactAction->setChecked(false);
+    statusBar()->showMessage(
+        "Saved redacted copy: " + QFileInfo(dest).fileName()
+            + ". The original PDF was not changed; inspect the copy before sharing.",
+        10000);
+}
+
 bool MainWindow::save()
 {
     m_view->commitPendingEdits();

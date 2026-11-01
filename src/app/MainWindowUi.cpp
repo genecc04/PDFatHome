@@ -24,6 +24,7 @@
 #include <QSpinBox>
 #include <QStatusBar>
 #include <QToolBar>
+#include <QToolButton>
 #include <QUrl>
 
 #include <utility>
@@ -76,6 +77,20 @@ void MainWindow::setupViewer()
     connect(m_view, &PageView::pendingChangesChanged, this, [this]() {
         updateActions();
         updateTitle();
+    });
+    connect(m_view, &PageView::redactionAreasChanged, this, [this](int count) {
+        updateActions();
+        if (count > 0) {
+            statusBar()->showMessage(
+                QString("%1 redaction area(s) marked. Review them, then select Apply "
+                        "Redactions to create a copy.")
+                    .arg(count),
+                8000);
+        }
+    });
+    connect(m_view, &PageView::redactionToolChanged, this, [this](bool active) {
+        QSignalBlocker blocker(m_redactAction);
+        m_redactAction->setChecked(active);
     });
     connect(m_view, &PageView::imagePlaced, this, &MainWindow::placeImage);
     connect(m_view, &PageView::imagePlacementStateChanged, this,
@@ -360,10 +375,40 @@ void MainWindow::setupMenus()
         }
     });
 
+    m_redactAction = editMenu->addAction("Mark redaction &areas");
+    m_redactAction->setCheckable(true);
+    m_redactAction->setShortcut(Qt::CTRL | Qt::SHIFT | Qt::Key_R);
+    connect(m_redactAction, &QAction::toggled, this, [this](bool on) {
+        if (on)
+            m_view->commitPendingEdits();
+        m_view->setRedactionToolActive(on);
+        if (on) {
+            statusBar()->showMessage(
+                "Drag rectangles over content to redact. Review the marked areas, then select "
+                "Apply Redactions to create a copy. The original PDF is not changed.",
+                12000);
+        } else if (m_view->hasRedactionAreas()) {
+            statusBar()->showMessage(
+                QString("%1 redaction area(s) marked. Apply them to create a redacted copy, "
+                        "or clear the marks.")
+                    .arg(m_view->redactionAreas().size()),
+                10000);
+        }
+    });
+
+    m_applyRedactionsAction = editMenu->addAction("Apply redactions to &copy...");
+    connect(m_applyRedactionsAction, &QAction::triggered,
+            this, &MainWindow::applyRedactions);
+
+    m_clearRedactionsAction = editMenu->addAction("Clear redaction areas");
+    connect(m_clearRedactionsAction, &QAction::triggered,
+            m_view, &PageView::clearRedactionAreas);
+
     auto *toolGroup = new QActionGroup(this);
     toolGroup->setExclusionPolicy(QActionGroup::ExclusionPolicy::ExclusiveOptional);
     toolGroup->addAction(m_addTextAction);
     toolGroup->addAction(m_drawAction);
+    toolGroup->addAction(m_redactAction);
 
     m_addImageAction = editMenu->addAction("Add &image...");
     m_addImageAction->setShortcut(Qt::CTRL | Qt::Key_I);
@@ -585,6 +630,24 @@ void MainWindow::setupDrawToolbar()
     m_drawAction->setIcon(QIcon(":/icons/draw.png"));
     m_drawAction->setToolTip("Draw on the PDF (active when checked)");
 
+    toolbar->addSeparator();
+    toolbar->addAction(m_redactAction);
+    m_redactAction->setToolTip(
+        "Mark rectangular areas for removal from a separate redacted PDF copy");
+    if (QToolButton *button = qobject_cast<QToolButton *>(
+            toolbar->widgetForAction(m_redactAction))) {
+        button->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    }
+
+    toolbar->addAction(m_applyRedactionsAction);
+    m_applyRedactionsAction->setToolTip(
+        "Apply marked redactions and save a separate PDF copy");
+    if (QToolButton *button = qobject_cast<QToolButton *>(
+            toolbar->widgetForAction(m_applyRedactionsAction))) {
+        button->setToolButtonStyle(Qt::ToolButtonTextOnly);
+    }
+
+    toolbar->addSeparator();
     auto *mode = new QComboBox(this);
     mode->addItem("Pen");
     mode->addItem("Highlighter");

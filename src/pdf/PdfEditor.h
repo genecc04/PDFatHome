@@ -77,6 +77,11 @@ public:
         QImage image;
     };
 
+    struct RedactionArea {
+        int page = -1;
+        QRectF bounds;
+    };
+
     PdfEditor();
     ~PdfEditor();
 
@@ -118,6 +123,9 @@ public:
                 const QString &password = QString());
     bool optimizeAs(const QString &path, Encryption encryption = Encryption::Keep,
                     const QString &password = QString());
+    bool redactAs(const QString &path, const QVector<RedactionArea> &areas,
+                  Encryption encryption = Encryption::Keep,
+                  const QString &password = QString());
     bool exportPages(const QStringList &outputPaths, const QString &format,
                      int firstPage, int resolution = 150);
     bool keepOnlyPages(int firstIndex, int lastIndex);

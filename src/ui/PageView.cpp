@@ -239,6 +239,9 @@ void PageView::setLoading(bool loading)
         finishFormEditor(false);
         m_autoScroll->stop();
         m_selecting = false;
+        m_redactionDrawing = false;
+        m_redactionPage = -1;
+        m_redactionPreview = QRectF();
         m_drawing = false;
         m_activeStroke = Stroke();
         m_erasing = false;
@@ -431,6 +434,8 @@ void PageView::onDocumentChanged(bool preserveRasterPreviews)
     m_pendingErasedStrokes.clear();
     m_pendingTextAnnotationPreview = TextAnnotationPreview();
     m_pendingImageStampPreview = ImageStampPreview();
+    setRedactionToolActive(false);
+    clearRedactionAreas();
 
     const bool hadStrokes = !m_strokes.isEmpty();
     m_strokes.clear();
@@ -1802,6 +1807,27 @@ void PageView::paintEvent(QPaintEvent *event)
             painter.restore();
         }
 
+        const auto drawRedactionPreview = [&painter, &target, this](const QRectF &bounds) {
+            const QRectF pixelBounds(
+                target.x() + bounds.x() * m_scale,
+                target.y() + bounds.y() * m_scale,
+                bounds.width() * m_scale,
+                bounds.height() * m_scale);
+            painter.save();
+            painter.setPen(QPen(QColor(120, 0, 0), 2, Qt::DashLine));
+            painter.setBrush(QColor(180, 0, 0, 150));
+            painter.drawRect(pixelBounds);
+            painter.restore();
+        };
+        for (const PdfEditor::RedactionArea &area : std::as_const(m_redactionAreas)) {
+            if (area.page == page)
+                drawRedactionPreview(area.bounds);
+        }
+        if (m_redactionDrawing && m_redactionPage == page
+            && !m_redactionPreview.isEmpty()) {
+            drawRedactionPreview(m_redactionPreview);
+        }
+
         painter.restore();
     }
 
@@ -1832,6 +1858,28 @@ void PageView::scrollContentsBy(int dx, int dy)
 void PageView::wheelEvent(QWheelEvent *event)
 {
     if (m_loading || m_interactionBlocked) {
+        event->accept();
+        return;
+    }
+
+    if (m_pressedLinkPage >= 0 && event->button() == Qt::LeftButton) {
+        const int pressedPage = m_pressedLinkPage;
+        const QUrl pressedUrl = m_pressedLinkUrl;
+        const int destinationPage = m_pressedLinkDestinationPage;
+        const QPointF destinationLocation = m_pressedLinkLocation;
+        m_pressedLinkPage = -1;
+        m_pressedLinkUrl = QUrl();
+        m_pressedLinkDestinationPage = -1;
+        m_pressedLinkLocation = QPointF();
+
+        const int releasePage = pageAtViewportPoint(event->position().toPoint());
+        if (releasePage == pressedPage) {
+            if (!pressedUrl.isEmpty())
+                emit externalLinkRequested(pressedUrl);
+            else if (destinationPage >= 0)
+                jumpToPage(destinationPage, destinationLocation);
+        }
+        viewport()->setCursor(Qt::ArrowCursor);
         event->accept();
         return;
     }
@@ -1885,6 +1933,10 @@ void PageView::keyPressEvent(QKeyEvent *event)
     }
     if (event->key() == Qt::Key_Escape && m_selectedImagePage >= 0) {
         clearSelectedImageStamp();
+        return;
+    }
+    if (event->key() == Qt::Key_Escape && m_redactionTool) {
+        setRedactionToolActive(false);
         return;
     }
     if (event->key() == Qt::Key_Delete && m_selectedTextAnnotationPage >= 0) {
@@ -2106,6 +2158,36 @@ void PageView::setDrawToolActive(bool active)
     else if (!m_textTool)
         viewport()->setCursor(Qt::ArrowCursor);
     viewport()->update();
+}
+
+void PageView::setRedactionToolActive(bool active)
+{
+    if (m_redactionTool == active)
+        return;
+
+    m_redactionTool = active;
+    m_redactionDrawing = false;
+    m_redactionPage = -1;
+    m_redactionPreview = QRectF();
+    m_pressedLinkPage = -1;
+    m_pressedLinkUrl = QUrl();
+    m_pressedLinkDestinationPage = -1;
+    m_pressedLinkLocation = QPointF();
+    if (active)
+        clearSelection();
+    viewport()->setCursor(active ? Qt::CrossCursor
+                                 : (m_textTool ? Qt::IBeamCursor : Qt::ArrowCursor));
+    viewport()->update();
+    emit redactionToolChanged(active);
+}
+
+void PageView::clearRedactionAreas()
+{
+    if (m_redactionAreas.isEmpty())
+        return;
+    m_redactionAreas.clear();
+    viewport()->update();
+    emit redactionAreasChanged(0);
 }
 
 void PageView::setEraserActive(bool active)
@@ -2736,6 +2818,21 @@ void PageView::mousePressEvent(QMouseEvent *event)
         return;
     }
 
+    if (m_redactionTool) {
+        if (event->button() == Qt::LeftButton) {
+            const int page = pageAtViewportPoint(pos);
+            if (page >= 0) {
+                m_redactionPage = page;
+                m_redactionStart = pagePointFor(page, pos);
+                m_redactionPreview = QRectF(m_redactionStart, QSizeF());
+                m_redactionDrawing = true;
+                viewport()->update();
+            }
+        }
+        event->accept();
+        return;
+    }
+
     if (m_imageActive) {
         if (event->button() != Qt::LeftButton)
             return;
@@ -3031,6 +3128,19 @@ void PageView::mouseMoveEvent(QMouseEvent *event)
         return;
 
     const QPoint pos = event->position().toPoint();
+    if (m_redactionTool) {
+        if (m_redactionDrawing && m_redactionPage >= 0
+            && m_redactionPage < m_pageSizes.size()) {
+            QPointF end = pagePointFor(m_redactionPage, pos);
+            const QSizeF pageSize = m_pageSizes.at(m_redactionPage);
+            end.setX(qBound(0.0, end.x(), pageSize.width()));
+            end.setY(qBound(0.0, end.y(), pageSize.height()));
+            m_redactionPreview = QRectF(m_redactionStart, end).normalized();
+            viewport()->update();
+        }
+        return;
+    }
+
     const PdfEditor::Link hoveredLink = linkAtViewportPoint(pos);
     setHoveredLink(hoveredLink.url);
 
@@ -3263,24 +3373,24 @@ void PageView::mouseReleaseEvent(QMouseEvent *event)
         return;
     }
 
-    if (m_pressedLinkPage >= 0 && event->button() == Qt::LeftButton) {
-        const int pressedPage = m_pressedLinkPage;
-        const QUrl pressedUrl = m_pressedLinkUrl;
-        const int destinationPage = m_pressedLinkDestinationPage;
-        const QPointF destinationLocation = m_pressedLinkLocation;
-        m_pressedLinkPage = -1;
-        m_pressedLinkUrl = QUrl();
-        m_pressedLinkDestinationPage = -1;
-        m_pressedLinkLocation = QPointF();
-
-        const int releasePage = pageAtViewportPoint(event->position().toPoint());
-        if (releasePage == pressedPage) {
-            if (!pressedUrl.isEmpty())
-                emit externalLinkRequested(pressedUrl);
-            else if (destinationPage >= 0)
-                jumpToPage(destinationPage, destinationLocation);
+    if (m_redactionTool) {
+        if (m_redactionDrawing && event->button() == Qt::LeftButton
+            && m_redactionPage >= 0 && m_redactionPage < m_pageSizes.size()) {
+            QPointF end = pagePointFor(
+                m_redactionPage, event->position().toPoint());
+            const QSizeF pageSize = m_pageSizes.at(m_redactionPage);
+            end.setX(qBound(0.0, end.x(), pageSize.width()));
+            end.setY(qBound(0.0, end.y(), pageSize.height()));
+            const QRectF bounds = QRectF(m_redactionStart, end).normalized();
+            if (bounds.width() >= 6.0 && bounds.height() >= 6.0) {
+                m_redactionAreas.append({ m_redactionPage, bounds });
+                emit redactionAreasChanged(m_redactionAreas.size());
+            }
+            m_redactionDrawing = false;
+            m_redactionPage = -1;
+            m_redactionPreview = QRectF();
+            viewport()->update();
         }
-        viewport()->setCursor(Qt::ArrowCursor);
         event->accept();
         return;
     }

@@ -74,6 +74,7 @@ private:
     bool save();
     bool saveAs();
     void optimizePdf();
+    void applyRedactions();
     void goToPage(int page);
     bool showFile(const QString &path, int page, bool reportErrors = true,
                   bool preserveRasterPreviews = false, bool forceReload = false);
@@ -157,6 +158,9 @@ private:
     QAction *m_saveAction = nullptr;
     QAction *m_saveAsAction = nullptr;
     QAction *m_optimizeAction = nullptr;
+    QAction *m_redactAction = nullptr;
+    QAction *m_applyRedactionsAction = nullptr;
+    QAction *m_clearRedactionsAction = nullptr;
     QAction *m_extractAction = nullptr;
     QAction *m_exportPngAction = nullptr;
     QAction *m_exportSvgAction = nullptr;
