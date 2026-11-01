@@ -862,6 +862,79 @@ bool PdfEditor::movePage(int fromIndex, int toIndex)
     return true;
 }
 
+bool PdfEditor::exportPages(const QStringList &outputPaths, const QString &format,
+                            int firstPage, int resolution)
+{
+    m_error.clear();
+    if (!m_doc) {
+        m_error = "No document is open.";
+        return false;
+    }
+    if (format != QLatin1String("png") && format != QLatin1String("svg")) {
+        m_error = "The requested export format is not supported.";
+        return false;
+    }
+    const int totalPages = pageCount();
+    if (totalPages < 0)
+        return false;
+    if (outputPaths.isEmpty() || firstPage < 0 || firstPage >= totalPages
+        || outputPaths.size() > totalPages - firstPage
+        || (format == QLatin1String("png") && resolution <= 0)) {
+        m_error = "The requested page range or export settings are invalid.";
+        return false;
+    }
+    for (const QString &path : outputPaths) {
+        if (path.trimmed().isEmpty()) {
+            m_error = "An export output path is empty.";
+            return false;
+        }
+    }
+
+    const QByteArray formatUtf8 = format.toUtf8();
+    for (int i = 0; i < outputPaths.size(); ++i) {
+        const QByteArray outputPath = outputPaths.at(i).toUtf8();
+        const QByteArray options = format == QLatin1String("png")
+            ? QStringLiteral("resolution=%1").arg(resolution).toUtf8()
+            : QByteArray();
+        fz_page *page = nullptr;
+        fz_document_writer *writer = nullptr;
+        fz_device *device = nullptr;
+        fz_var(page);
+        fz_var(writer);
+        fz_var(device);
+
+        fz_try(m_ctx)
+        {
+            page = fz_load_page(m_ctx, &m_doc->super, firstPage + i);
+            const fz_rect bounds = fz_bound_page(m_ctx, page);
+            writer = fz_new_document_writer(m_ctx, outputPath.constData(),
+                                            formatUtf8.constData(),
+                                            options.isEmpty() ? nullptr : options.constData());
+            device = fz_begin_page(m_ctx, writer, bounds);
+            fz_run_page(m_ctx, page, device, fz_identity, nullptr);
+            fz_end_page(m_ctx, writer);
+            device = nullptr;
+            fz_close_document_writer(m_ctx, writer);
+        }
+        fz_always(m_ctx)
+        {
+            if (writer)
+                fz_drop_document_writer(m_ctx, writer);
+            if (page)
+                fz_drop_page(m_ctx, page);
+        }
+        fz_catch(m_ctx)
+        {
+            m_error = QStringLiteral("Could not export page %1 to %2: %3")
+                          .arg(firstPage + i + 1)
+                          .arg(outputPaths.at(i),
+                               QString::fromUtf8(fz_caught_message(m_ctx)));
+            return false;
+        }
+    }
+    return true;
+}
+
 bool PdfEditor::keepOnlyPages(int firstIndex, int lastIndex)
 {
     if (!m_doc) {

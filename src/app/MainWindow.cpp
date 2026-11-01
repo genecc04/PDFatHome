@@ -142,6 +142,8 @@ void MainWindow::updateActions()
     m_setPasswordAction->setEnabled(editable);
     m_removePasswordAction->setEnabled(editable && isPasswordProtected());
     m_extractAction->setEnabled(editable);
+    m_exportPngAction->setEnabled(editable);
+    m_exportSvgAction->setEnabled(editable);
     m_insertAction->setEnabled(editable);
     m_highlightAction->setEnabled(editable);
     m_addTextAction->setEnabled(editable);

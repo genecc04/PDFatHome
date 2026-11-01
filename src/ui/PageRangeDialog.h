@@ -6,7 +6,8 @@ class QSpinBox;
 class PageRangeDialog : public QDialog
 {
 public:
-    PageRangeDialog(int pageCount, int currentPage, QWidget *parent = nullptr);
+    PageRangeDialog(int pageCount, int currentPage, QWidget *parent = nullptr,
+                    const QString &title = QString());
 
     int firstPage() const;
     int lastPage() const;

@@ -116,6 +116,7 @@ private:
     void eraseInk(int page, const QVector<QPointF> &path, double radius);
     void addImage();
     void placeImage(int page, const QRectF &box, const QImage &image);
+    void exportPages(const QString &format);
     bool fillFormField(int page, const QPointF &point, PageView::FormField *field);
     bool commitFormField(int page, int widgetIndex, const QString &value);
     bool refreshFormFieldOverlays(int firstPage = -1, int lastPage = -1);
@@ -155,6 +156,8 @@ private:
     QAction *m_saveAction = nullptr;
     QAction *m_saveAsAction = nullptr;
     QAction *m_extractAction = nullptr;
+    QAction *m_exportPngAction = nullptr;
+    QAction *m_exportSvgAction = nullptr;
     QAction *m_insertAction = nullptr;
     QAction *m_undoAction = nullptr;
     QAction *m_redoAction = nullptr;

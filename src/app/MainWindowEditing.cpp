@@ -7,6 +7,7 @@
 #include <QApplication>
 #include <QBuffer>
 #include <QDialog>
+#include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QImage>
@@ -16,6 +17,7 @@
 #include <QMessageBox>
 #include <QProgressDialog>
 #include <QStatusBar>
+#include <utility>
 
 namespace {
 
@@ -173,6 +175,85 @@ void MainWindow::extractPages()
     }
 
     statusBar()->showMessage("Extracted pages to " + QFileInfo(dest).fileName(), 4000);
+}
+
+void MainWindow::exportPages(const QString &format)
+{
+    m_view->commitPendingEdits();
+    if (!m_editor || (format != QLatin1String("png") && format != QLatin1String("svg")))
+        return;
+
+    PageRangeDialog rangeDialog(m_document->pageCount(), m_view->currentPage(),
+                                this, "Export pages");
+    if (rangeDialog.exec() != QDialog::Accepted)
+        return;
+
+    const QString fileType = format.toUpper();
+    const QString defaultName =
+        QFileInfo(m_currentPath).completeBaseName() + QLatin1Char('.') + format;
+    const QString selectedPath = QFileDialog::getSaveFileName(
+        this, QString("Choose a filename for %1 export (multi-page exports are numbered)")
+                    .arg(fileType),
+        defaultName,
+        format == QLatin1String("png")
+            ? "PNG images (*.png)"
+            : "SVG files (*.svg)");
+    if (selectedPath.isEmpty())
+        return;
+
+    const QFileInfo selectedInfo(selectedPath);
+    const QString baseName = selectedInfo.completeBaseName();
+    const QString extension = QLatin1Char('.') + format;
+    const int firstPage = rangeDialog.firstPage();
+    const int lastPage = rangeDialog.lastPage();
+    const int pageCount = lastPage - firstPage + 1;
+    const QDir outputDirectory(selectedInfo.absolutePath());
+    QStringList outputPaths;
+    outputPaths.reserve(pageCount);
+    for (int page = firstPage; page <= lastPage; ++page) {
+        const QString fileName = pageCount == 1
+            ? baseName + extension
+            : QStringLiteral("%1-%2%3")
+                  .arg(baseName)
+                  .arg(page + 1, 3, 10, QLatin1Char('0'))
+                  .arg(extension);
+        outputPaths.append(outputDirectory.filePath(fileName));
+    }
+
+    QStringList existingFiles;
+    for (const QString &path : std::as_const(outputPaths)) {
+        if (QFileInfo::exists(path))
+            existingFiles.append(QFileInfo(path).fileName());
+    }
+    if (!existingFiles.isEmpty()) {
+        const QString fileList = existingFiles.size() <= 5
+            ? existingFiles.join(QStringLiteral("\n"))
+            : QStringLiteral("%1 and %2 other file(s)")
+                  .arg(existingFiles.first())
+                  .arg(existingFiles.size() - 1);
+        if (QMessageBox::question(
+                this, "Overwrite export files",
+                "These files already exist:\n" + fileList
+                    + "\n\nDo you want to overwrite them?",
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+            != QMessageBox::Yes)
+            return;
+    }
+
+    EditOperationGuard operation(this);
+    if (!m_editor->exportPages(outputPaths, format, firstPage)) {
+        const QString partialOutput = pageCount > 1
+            ? "\nSome earlier pages may already have been exported."
+            : QString();
+        QMessageBox::warning(this, "Export failed",
+                             m_editor->lastError() + partialOutput);
+        return;
+    }
+    statusBar()->showMessage(
+        QString("Exported %1 page(s) as %2.")
+            .arg(pageCount)
+            .arg(fileType),
+        5000);
 }
 
 void MainWindow::insertPages()

@@ -5,10 +5,11 @@
 #include <QSpinBox>
 #include <QVBoxLayout>
 
-PageRangeDialog::PageRangeDialog(int pageCount, int currentPage, QWidget *parent)
+PageRangeDialog::PageRangeDialog(int pageCount, int currentPage, QWidget *parent,
+                                 const QString &title)
     : QDialog(parent)
 {
-    setWindowTitle("Extract pages");
+    setWindowTitle(title.isEmpty() ? QStringLiteral("Extract pages") : title);
 
     m_from = new QSpinBox(this);
     m_to = new QSpinBox(this);

@@ -293,6 +293,14 @@ void MainWindow::setupMenus()
     m_extractAction = fileMenu->addAction("&Extract pages...");
     connect(m_extractAction, &QAction::triggered, this, &MainWindow::extractPages);
 
+    QMenu *exportMenu = fileMenu->addMenu("Export pages");
+    m_exportPngAction = exportMenu->addAction("Export as &PNG images...");
+    connect(m_exportPngAction, &QAction::triggered, this,
+            [this]() { exportPages(QStringLiteral("png")); });
+    m_exportSvgAction = exportMenu->addAction("Export as &SVG files...");
+    connect(m_exportSvgAction, &QAction::triggered, this,
+            [this]() { exportPages(QStringLiteral("svg")); });
+
     m_insertAction = fileMenu->addAction("&Insert pages from PDF...");
     connect(m_insertAction, &QAction::triggered, this, &MainWindow::insertPages);
 
