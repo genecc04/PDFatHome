@@ -622,7 +622,6 @@ void PageView::updateCurrentPage()
     const int page = qMax(0, int(nextPage - m_pageRects.cbegin()) - 1);
     if (page != m_currentPage) {
         m_currentPage = page;
-        discardQueuedPageRenders();
         trimPageImageCaches();
         emit currentPageChanged(page);
     }
@@ -677,7 +676,6 @@ void PageView::jumpToPage(int page, const QPointF &location)
 
     if (page != m_currentPage) {
         m_currentPage = page;
-        discardQueuedPageRenders();
         trimPageImageCaches();
         emit currentPageChanged(page);
     }
