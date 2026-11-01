@@ -33,7 +33,8 @@ web links embedded in a PDF in your default browser after you confirm.
 - Draw with a pen, a highlighter or white-out, with adjustable size, color and opacity.
 - Highlight every occurrence of a word or phrase
 - Add images and signatures. Pick a file and click the page. Use Crop in the image
-  toolbar and drag a corner handle inward to crop; switch Crop off to move or resize.
+  toolbar and drag a corner handle inward to crop. Newly added images can be selected,
+  moved, proportionally resized from a corner, or deleted with Delete.
   Select Cancel or press Esc to stop placing the image
 
 **Security**

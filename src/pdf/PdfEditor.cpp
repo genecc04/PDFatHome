@@ -143,6 +143,13 @@ bool isAppTextAnnotation(fz_context *ctx, pdf_annot *annot)
     return name && QByteArray(name).startsWith("OfflinePdfReaderText:");
 }
 
+bool isAppImageAnnotation(fz_context *ctx, pdf_annot *annot)
+{
+    const char *name = pdf_to_text_string(
+        ctx, pdf_dict_gets(ctx, pdf_annot_obj(ctx, annot), "NM"));
+    return name && QByteArray(name).startsWith("OfflinePdfReaderImage:");
+}
+
 bool pageHasWidgetAnnots(fz_context *ctx, pdf_document *doc, int pageIndex)
 {
     pdf_obj *pageObj = pdf_lookup_page_obj(ctx, doc, pageIndex);
@@ -1618,6 +1625,9 @@ bool PdfEditor::addImageStamp(int pageIndex, const QRectF &box, const QByteArray
     const size_t size = size_t(imageData.size());
     const fz_rect rect = fz_make_rect(float(box.left()), float(box.top()),
                                       float(box.right()), float(box.bottom()));
+    const QByteArray annotationName =
+        QStringLiteral("OfflinePdfReaderImage:")
+            .append(QUuid::createUuid().toString(QUuid::WithoutBraces)).toUtf8();
 
     clearSelectionTextCache();
     pdf_page *page = nullptr;
@@ -1636,6 +1646,8 @@ bool PdfEditor::addImageStamp(int pageIndex, const QRectF &box, const QByteArray
         page = pdf_load_page(m_ctx, m_doc, pageIndex);
 
         annot = pdf_create_annot(m_ctx, page, PDF_ANNOT_STAMP);
+        pdf_dict_puts_drop(m_ctx, pdf_annot_obj(m_ctx, annot), "NM",
+                           pdf_new_text_string(m_ctx, annotationName.constData()));
         pdf_set_annot_rect(m_ctx, annot, rect);
         pdf_set_annot_stamp_image(m_ctx, annot, image);
         pdf_set_annot_rect(m_ctx, annot, rect);
@@ -1658,6 +1670,215 @@ bool PdfEditor::addImageStamp(int pageIndex, const QRectF &box, const QByteArray
         return false;
     }
     return true;
+}
+
+bool PdfEditor::imageStampAt(int pageIndex, const QPointF &point, ImageStamp *stamp)
+{
+    m_error.clear();
+    if (!m_doc) {
+        m_error = "No document is open.";
+        return false;
+    }
+    if (!stamp) {
+        m_error = "No image stamp result was provided.";
+        return false;
+    }
+
+    pdf_page *page = nullptr;
+    pdf_annot *annot = nullptr;
+    pdf_obj *imageObject = nullptr;
+    fz_image *image = nullptr;
+    fz_pixmap *previewPixmap = nullptr;
+    fz_device *device = nullptr;
+    bool found = false;
+    QString id;
+    QRectF bounds;
+    QImage decoded;
+    fz_var(page);
+    fz_var(annot);
+    fz_var(imageObject);
+    fz_var(image);
+    fz_var(previewPixmap);
+    fz_var(device);
+    fz_var(found);
+
+    fz_try(m_ctx)
+    {
+        page = pdf_load_page(m_ctx, m_doc, pageIndex);
+        for (annot = pdf_first_annot(m_ctx, page); annot;
+             annot = pdf_next_annot(m_ctx, annot)) {
+            if (pdf_annot_type(m_ctx, annot) != PDF_ANNOT_STAMP
+                || !isAppImageAnnotation(m_ctx, annot))
+                continue;
+            const fz_rect rect = pdf_annot_rect(m_ctx, annot);
+            if (point.x() < rect.x0 || point.x() > rect.x1
+                || point.y() < rect.y0 || point.y() > rect.y1)
+                continue;
+
+            const char *name = pdf_to_text_string(
+                m_ctx, pdf_dict_gets(m_ctx, pdf_annot_obj(m_ctx, annot), "NM"));
+            imageObject = pdf_annot_stamp_image_obj(m_ctx, annot);
+            if (!imageObject) {
+                m_error = "The selected image annotation has no embedded image.";
+                break;
+            }
+            image = pdf_load_image(m_ctx, m_doc, imageObject);
+            const int width = image->w;
+            const int height = image->h;
+            if (width <= 0 || height <= 0 || rect.x1 <= rect.x0 || rect.y1 <= rect.y0) {
+                m_error = "The selected image could not be decoded.";
+                break;
+            }
+            previewPixmap = fz_new_pixmap(m_ctx, fz_device_rgb(m_ctx), width, height,
+                                          nullptr, 1);
+            fz_clear_pixmap(m_ctx, previewPixmap);
+            device = fz_new_draw_device(m_ctx, fz_identity, previewPixmap);
+            fz_matrix transform = fz_translate(-rect.x0, -rect.y0);
+            transform = fz_post_scale(transform, width / (rect.x1 - rect.x0),
+                                      height / (rect.y1 - rect.y0));
+            pdf_run_annot(m_ctx, annot, device, transform, nullptr);
+            fz_close_device(m_ctx, device);
+            QImage wrapper(fz_pixmap_samples(m_ctx, previewPixmap), width, height,
+                           int(fz_pixmap_stride(m_ctx, previewPixmap)),
+                           QImage::Format_RGBA8888_Premultiplied);
+            decoded = wrapper.copy();
+            if (decoded.isNull()) {
+                m_error = "The selected image could not be decoded.";
+                break;
+            }
+            id = QString::fromUtf8(name);
+            bounds = QRectF(rect.x0, rect.y0, rect.x1 - rect.x0, rect.y1 - rect.y0);
+            found = true;
+            break;
+        }
+    }
+    fz_always(m_ctx)
+    {
+        if (device)
+            fz_drop_device(m_ctx, device);
+        if (previewPixmap)
+            fz_drop_pixmap(m_ctx, previewPixmap);
+        if (image)
+            fz_drop_image(m_ctx, image);
+        if (page)
+            fz_drop_page(m_ctx, &page->super);
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return false;
+    }
+
+    if (!m_error.isEmpty())
+        return false;
+    if (!found)
+        return false;
+    stamp->id = id;
+    stamp->bounds = bounds;
+    stamp->image = decoded;
+    return true;
+}
+
+bool PdfEditor::setImageStampBounds(int pageIndex, const QString &id,
+                                    const QRectF &bounds)
+{
+    m_error.clear();
+    if (!m_doc) {
+        m_error = "No document is open.";
+        return false;
+    }
+    if (bounds.width() <= 0.0 || bounds.height() <= 0.0) {
+        m_error = "The image bounds must have positive dimensions.";
+        return false;
+    }
+
+    const QByteArray expectedId = id.toUtf8();
+    const fz_rect rect = fz_make_rect(float(bounds.left()), float(bounds.top()),
+                                      float(bounds.right()), float(bounds.bottom()));
+    pdf_page *page = nullptr;
+    pdf_annot *annot = nullptr;
+    bool found = false;
+    fz_var(page);
+    fz_var(annot);
+    fz_var(found);
+    clearSelectionTextCache();
+    fz_try(m_ctx)
+    {
+        page = pdf_load_page(m_ctx, m_doc, pageIndex);
+        for (annot = pdf_first_annot(m_ctx, page); annot;
+             annot = pdf_next_annot(m_ctx, annot)) {
+            const char *name = pdf_to_text_string(
+                m_ctx, pdf_dict_gets(m_ctx, pdf_annot_obj(m_ctx, annot), "NM"));
+            if (pdf_annot_type(m_ctx, annot) == PDF_ANNOT_STAMP
+                && isAppImageAnnotation(m_ctx, annot)
+                && name && expectedId == name) {
+                pdf_set_annot_rect(m_ctx, annot, rect);
+                pdf_update_annot(m_ctx, annot);
+                found = true;
+                break;
+            }
+        }
+    }
+    fz_always(m_ctx)
+    {
+        if (page)
+            fz_drop_page(m_ctx, &page->super);
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return false;
+    }
+    if (!found)
+        m_error = "The selected image annotation could not be found.";
+    return found;
+}
+
+bool PdfEditor::deleteImageStamp(int pageIndex, const QString &id)
+{
+    m_error.clear();
+    if (!m_doc) {
+        m_error = "No document is open.";
+        return false;
+    }
+
+    const QByteArray expectedId = id.toUtf8();
+    pdf_page *page = nullptr;
+    pdf_annot *annot = nullptr;
+    bool found = false;
+    fz_var(page);
+    fz_var(annot);
+    fz_var(found);
+    clearSelectionTextCache();
+    fz_try(m_ctx)
+    {
+        page = pdf_load_page(m_ctx, m_doc, pageIndex);
+        for (annot = pdf_first_annot(m_ctx, page); annot;
+             annot = pdf_next_annot(m_ctx, annot)) {
+            const char *name = pdf_to_text_string(
+                m_ctx, pdf_dict_gets(m_ctx, pdf_annot_obj(m_ctx, annot), "NM"));
+            if (pdf_annot_type(m_ctx, annot) == PDF_ANNOT_STAMP
+                && isAppImageAnnotation(m_ctx, annot)
+                && name && expectedId == name) {
+                pdf_delete_annot(m_ctx, page, annot);
+                found = true;
+                break;
+            }
+        }
+    }
+    fz_always(m_ctx)
+    {
+        if (page)
+            fz_drop_page(m_ctx, &page->super);
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return false;
+    }
+    if (!found)
+        m_error = "The selected image annotation could not be found.";
+    return found;
 }
 
 bool PdfEditor::formFieldsOnPage(int pageIndex, QVector<FormField> *fields)

@@ -248,6 +248,7 @@ void PageView::setLoading(bool loading)
         m_pendingErasedPage = -1;
         m_pendingErasedStrokes.clear();
         m_pendingTextAnnotationPreview = TextAnnotationPreview();
+        m_pendingImageStampPreview = ImageStampPreview();
         m_imageDrag = ImageDrag::None;
         m_imageCropDragging = false;
         m_movingTextAnnotation = false;
@@ -411,6 +412,7 @@ void PageView::onDocumentChanged(bool preserveRasterPreviews)
     m_textAnnotationResizeCorner = -1;
 
     clearSelectedTextAnnotation();
+    clearSelectedImageStamp();
     m_selecting = false;
     m_pressedLinkPage = -1;
     m_pressedLinkUrl = QUrl();
@@ -428,6 +430,7 @@ void PageView::onDocumentChanged(bool preserveRasterPreviews)
     m_pendingErasedPage = -1;
     m_pendingErasedStrokes.clear();
     m_pendingTextAnnotationPreview = TextAnnotationPreview();
+    m_pendingImageStampPreview = ImageStampPreview();
 
     const bool hadStrokes = !m_strokes.isEmpty();
     m_strokes.clear();
@@ -511,6 +514,8 @@ void PageView::finishPendingRasterPreview(int page, const QSize &tilePageSize)
     }
     if (m_pendingTextAnnotationPreview.page == page)
         m_pendingTextAnnotationPreview = TextAnnotationPreview();
+    if (m_pendingImageStampPreview.page == page)
+        m_pendingImageStampPreview = ImageStampPreview();
     if (page >= 0 && page < m_pageRects.size()) {
         const QPoint offset(horizontalScrollBar()->value(), verticalScrollBar()->value());
         viewport()->update(m_pageRects.at(page).translated(-offset));
@@ -1690,6 +1695,67 @@ void PageView::paintEvent(QPaintEvent *event)
                             m_pendingTextAnnotationPreview.style);
         }
 
+        const auto drawImageStampPreview = [this, &painter, page, target, dpr](
+                                               const QRectF &oldPageBounds,
+                                               const QRectF &newPageBounds,
+                                               const QImage &image) {
+            const QRectF oldViewportBounds(
+                target.x() + oldPageBounds.x() * m_scale,
+                target.y() + oldPageBounds.y() * m_scale,
+                oldPageBounds.width() * m_scale,
+                oldPageBounds.height() * m_scale);
+            const QPixmap basePage = pageImage(page, target.size(), dpr, false);
+            if (!basePage.isNull()) {
+                painter.save();
+                painter.setCompositionMode(QPainter::CompositionMode_Source);
+                painter.setClipRect(oldViewportBounds, Qt::IntersectClip);
+                painter.drawPixmap(target, basePage, basePage.rect());
+                painter.restore();
+            }
+            if (!newPageBounds.isEmpty() && !image.isNull()) {
+                const QRectF imageBounds(
+                    target.x() + newPageBounds.x() * m_scale,
+                    target.y() + newPageBounds.y() * m_scale,
+                    newPageBounds.width() * m_scale,
+                    newPageBounds.height() * m_scale);
+                painter.save();
+                painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+                painter.drawImage(imageBounds, image);
+                painter.restore();
+            }
+        };
+        if (m_selectedImagePage == page) {
+            if ((m_movingImageStamp || m_resizingImageStamp)
+                && !m_selectedImagePixmap.isNull()) {
+                drawImageStampPreview(m_imageStampOriginalBounds,
+                                      m_selectedImageBounds,
+                                      m_selectedImagePixmap);
+            }
+            const QRectF imageBounds(
+                target.x() + m_selectedImageBounds.x() * m_scale,
+                target.y() + m_selectedImageBounds.y() * m_scale,
+                m_selectedImageBounds.width() * m_scale,
+                m_selectedImageBounds.height() * m_scale);
+            painter.save();
+            painter.setPen(QPen(QColor(0, 102, 204), 2, Qt::DashLine));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawRect(imageBounds);
+            painter.setPen(QPen(QColor(0, 102, 204), 1));
+            painter.setBrush(Qt::white);
+            const QPointF corners[] = {
+                imageBounds.topLeft(), imageBounds.topRight(),
+                imageBounds.bottomLeft(), imageBounds.bottomRight()
+            };
+            for (const QPointF &corner : corners)
+                painter.drawRect(QRectF(corner.x() - 4, corner.y() - 4, 8, 8));
+            painter.restore();
+        }
+        if (m_pendingImageStampPreview.page == page) {
+            drawImageStampPreview(m_pendingImageStampPreview.oldBounds,
+                                  m_pendingImageStampPreview.newBounds,
+                                  m_pendingImageStampPreview.image);
+        }
+
         if (m_selectedTextAnnotationPage == page) {
             const QRectF bounds(
                 target.x() + m_selectedTextAnnotationBounds.x() * m_scale,
@@ -1817,8 +1883,16 @@ void PageView::keyPressEvent(QKeyEvent *event)
         clearSelectedTextAnnotation();
         return;
     }
+    if (event->key() == Qt::Key_Escape && m_selectedImagePage >= 0) {
+        clearSelectedImageStamp();
+        return;
+    }
     if (event->key() == Qt::Key_Delete && m_selectedTextAnnotationPage >= 0) {
         deleteSelectedTextAnnotation();
+        return;
+    }
+    if (event->key() == Qt::Key_Delete && m_selectedImagePage >= 0) {
+        deleteSelectedImageStamp();
         return;
     }
     QAbstractScrollArea::keyPressEvent(event);
@@ -1970,6 +2044,7 @@ void PageView::contextMenuEvent(QContextMenuEvent *event)
                                    &annotationId, &annotationBounds, &annotationText,
                                    &annotationStyle);
     if (onAnnotation) {
+        clearSelectedImageStamp();
         selectTextAnnotation(page, annotationId, annotationBounds,
                              annotationText, annotationStyle);
     } else {
@@ -1979,10 +2054,20 @@ void PageView::contextMenuEvent(QContextMenuEvent *event)
     QMenu menu(this);
     QAction *editAnnotation = nullptr;
     QAction *deleteAnnotation = nullptr;
+    QAction *deleteImage = nullptr;
     if (m_selectedTextAnnotationPage >= 0) {
         editAnnotation = menu.addAction("Edit added text...");
         deleteAnnotation = menu.addAction("Delete added text");
         menu.addSeparator();
+    } else if (page >= 0 && m_imageStampHandler) {
+        PdfEditor::ImageStamp stamp;
+        if (m_imageStampHandler(page, pagePointFor(page, event->pos()), &stamp)) {
+            selectImageStamp(page, stamp);
+            deleteImage = menu.addAction("Delete added image");
+            menu.addSeparator();
+        } else {
+            clearSelectedImageStamp();
+        }
     }
     QAction *copy = menu.addAction("Copy");
     copy->setShortcut(QKeySequence::Copy);
@@ -1997,6 +2082,8 @@ void PageView::contextMenuEvent(QContextMenuEvent *event)
                                          m_selectedTextAnnotationContents);
     } else if (chosen == deleteAnnotation) {
         deleteSelectedTextAnnotation();
+    } else if (chosen == deleteImage) {
+        deleteSelectedImageStamp();
     } else if (chosen == copy) {
         copySelection();
     } else if (chosen == all) {
@@ -2144,6 +2231,8 @@ void PageView::beginImagePlacement(const QImage &image)
     finishImage(false);
     if (image.isNull())
         return;
+    clearSelectedImageStamp();
+    clearSelectedTextAnnotation();
     clearSelection();
     m_pendingImage = image;
     m_imageAwaiting = true;
@@ -2408,6 +2497,12 @@ void PageView::setTextAnnotationHandler(
     m_textAnnotationHandler = handler;
 }
 
+void PageView::setImageStampHandler(
+    const std::function<bool(int, const QPointF &, PdfEditor::ImageStamp *)> &handler)
+{
+    m_imageStampHandler = handler;
+}
+
 void PageView::editTextAnnotationInline(int page, int annotationId, const QString &text)
 {
     if (m_selectedTextAnnotationPage != page
@@ -2453,6 +2548,49 @@ void PageView::deleteSelectedTextAnnotation()
     emit textAnnotationDeleteRequested(page, annotationId, text);
 }
 
+void PageView::deleteSelectedImageStamp()
+{
+    if (m_selectedImagePage < 0)
+        return;
+
+    const int page = m_selectedImagePage;
+    const QString id = m_selectedImageId;
+    m_pendingImageStampPreview = {
+        page, m_selectedImageBounds, QRectF(), m_selectedImagePixmap
+    };
+    clearSelectedImageStamp();
+    emit imageStampDeleteRequested(page, id);
+}
+
+void PageView::selectImageStamp(int page, const PdfEditor::ImageStamp &stamp)
+{
+    const bool wasSelected = m_selectedImagePage >= 0;
+    m_selectedImagePage = page;
+    m_selectedImageId = stamp.id;
+    m_selectedImageBounds = stamp.bounds;
+    m_imageStampOriginalBounds = stamp.bounds;
+    m_selectedImagePixmap = stamp.image;
+    if (!wasSelected)
+        emit imageStampSelectionChanged(true);
+    viewport()->update();
+}
+
+void PageView::clearSelectedImageStamp()
+{
+    if (m_selectedImagePage < 0)
+        return;
+    m_selectedImagePage = -1;
+    m_selectedImageId.clear();
+    m_selectedImageBounds = QRectF();
+    m_imageStampOriginalBounds = QRectF();
+    m_selectedImagePixmap = QImage();
+    m_movingImageStamp = false;
+    m_resizingImageStamp = false;
+    m_imageStampResizeCorner = -1;
+    emit imageStampSelectionChanged(false);
+    viewport()->update();
+}
+
 void PageView::selectTextAnnotation(int page, int annotationId, const QRectF &bounds,
                                     const QString &text, const TextStyle &style)
 {
@@ -2490,6 +2628,32 @@ QRectF PageView::selectedTextAnnotationViewportBounds() const
                   page.y() + m_selectedTextAnnotationBounds.y() * m_scale,
                   m_selectedTextAnnotationBounds.width() * m_scale,
                   m_selectedTextAnnotationBounds.height() * m_scale);
+}
+
+QRectF PageView::selectedImageViewportBounds() const
+{
+    if (m_selectedImagePage < 0 || m_selectedImagePage >= m_pageRects.size())
+        return {};
+    const QRect page = pageRectInViewport(m_selectedImagePage);
+    return QRectF(page.x() + m_selectedImageBounds.x() * m_scale,
+                  page.y() + m_selectedImageBounds.y() * m_scale,
+                  m_selectedImageBounds.width() * m_scale,
+                  m_selectedImageBounds.height() * m_scale);
+}
+
+int PageView::imageStampResizeHandleAt(const QPoint &pos) const
+{
+    const QRectF bounds = selectedImageViewportBounds();
+    if (bounds.isEmpty())
+        return -1;
+    const QPointF corners[] = {
+        bounds.topLeft(), bounds.topRight(), bounds.bottomLeft(), bounds.bottomRight()
+    };
+    for (int i = 0; i < 4; ++i) {
+        if (QRectF(corners[i] - QPointF(7, 7), QSizeF(14, 14)).contains(pos))
+            return i;
+    }
+    return -1;
 }
 
 int PageView::textAnnotationResizeHandleAt(const QPoint &pos) const
@@ -2714,6 +2878,21 @@ void PageView::mousePressEvent(QMouseEvent *event)
 
     if (event->button() == Qt::LeftButton && !m_textTool && !m_drawTool) {
         setFocus();
+        if (m_selectedImagePage >= 0) {
+            const int resizeCorner = imageStampResizeHandleAt(pos);
+            if (resizeCorner >= 0) {
+                m_resizingImageStamp = true;
+                m_imageStampResizeCorner = resizeCorner;
+                m_imageStampOriginalBounds = m_selectedImageBounds;
+                return;
+            }
+            if (selectedImageViewportBounds().contains(QPointF(pos))) {
+                m_movingImageStamp = true;
+                m_imageStampMoveStart = pagePointFor(m_selectedImagePage, pos);
+                m_imageStampOriginalBounds = m_selectedImageBounds;
+                return;
+            }
+        }
         if (m_selectedTextAnnotationPage >= 0) {
             const int resizeCorner = textAnnotationResizeHandleAt(pos);
             if (resizeCorner >= 0) {
@@ -2739,12 +2918,24 @@ void PageView::mousePressEvent(QMouseEvent *event)
             && m_textAnnotationHandler(page, pagePointFor(page, pos),
                                        &annotationId, &annotationBounds, &annotationText,
                                        &annotationStyle)) {
+            clearSelectedImageStamp();
             selectTextAnnotation(page, annotationId, annotationBounds,
                                  annotationText, annotationStyle);
             clearSelection();
             return;
         }
         clearSelectedTextAnnotation();
+        PdfEditor::ImageStamp imageStamp;
+        if (page >= 0 && m_imageStampHandler
+            && m_imageStampHandler(page, pagePointFor(page, pos), &imageStamp)) {
+            selectImageStamp(page, imageStamp);
+            m_movingImageStamp = true;
+            m_imageStampMoveStart = pagePointFor(page, pos);
+            m_imageStampOriginalBounds = imageStamp.bounds;
+            clearSelection();
+            return;
+        }
+        clearSelectedImageStamp();
         if (page >= 0 && m_formFieldHandler) {
             FormField field;
             if (m_formFieldHandler(page, pagePointFor(page, pos), &field)) {
@@ -2813,12 +3004,20 @@ void PageView::mouseDoubleClickEvent(QMouseEvent *event)
         if (page >= 0 && m_textAnnotationHandler
             && m_textAnnotationHandler(page, pagePointFor(page, pos),
                                        &annotationId, &bounds, &text, &style)) {
+            clearSelectedImageStamp();
             selectTextAnnotation(page, annotationId, bounds, text, style);
             emit textAnnotationEditRequested(page, annotationId, text);
             return;
         }
         if (page >= 0) {
             clearSelectedTextAnnotation();
+            PdfEditor::ImageStamp stamp;
+            if (m_imageStampHandler
+                && m_imageStampHandler(page, pagePointFor(page, pos), &stamp)) {
+                selectImageStamp(page, stamp);
+                return;
+            }
+            clearSelectedImageStamp();
             selectWordAt(page, pagePointFor(page, pos));
             return;
         }
@@ -2886,6 +3085,49 @@ void PageView::mouseMoveEvent(QMouseEvent *event)
                                qMax(0.0, pageSize.height() - bounds.height()));
         bounds.moveTopLeft(QPointF(x, y));
         m_selectedTextAnnotationBounds = bounds;
+        viewport()->update();
+        return;
+    }
+
+    if (m_resizingImageStamp) {
+        const QPointF point = pagePointFor(m_selectedImagePage, pos);
+        const QSizeF pageSize = m_pageSizes.at(m_selectedImagePage);
+        const QRectF original = m_imageStampOriginalBounds;
+        const bool right = m_imageStampResizeCorner == 1
+                           || m_imageStampResizeCorner == 3;
+        const bool down = m_imageStampResizeCorner == 2
+                          || m_imageStampResizeCorner == 3;
+        const QPointF anchor(
+            right ? original.left() : original.right(),
+            down ? original.top() : original.bottom());
+        const qreal aspect = original.width() / original.height();
+        const qreal signX = right ? 1.0 : -1.0;
+        const qreal signY = down ? 1.0 : -1.0;
+        const qreal availableWidth = right ? pageSize.width() - anchor.x() : anchor.x();
+        const qreal availableHeight = down ? pageSize.height() - anchor.y() : anchor.y();
+        const qreal maxWidth = qMin(availableWidth, availableHeight * aspect);
+        qreal width = qMax(signX * (point.x() - anchor.x()),
+                           signY * (point.y() - anchor.y()) * aspect);
+        width = qBound(qMin(12.0, maxWidth), width, maxWidth);
+        const qreal height = width / aspect;
+        m_selectedImageBounds = QRectF(
+            right ? anchor.x() : anchor.x() - width,
+            down ? anchor.y() : anchor.y() - height, width, height);
+        viewport()->update();
+        return;
+    }
+
+    if (m_movingImageStamp) {
+        const QPointF point = pagePointFor(m_selectedImagePage, pos);
+        const QSizeF pageSize = m_pageSizes.at(m_selectedImagePage);
+        const QPointF delta = point - m_imageStampMoveStart;
+        QRectF bounds = m_imageStampOriginalBounds;
+        const qreal x = qBound(0.0, bounds.left() + delta.x(),
+                               qMax(0.0, pageSize.width() - bounds.width()));
+        const qreal y = qBound(0.0, bounds.top() + delta.y(),
+                               qMax(0.0, pageSize.height() - bounds.height()));
+        bounds.moveTopLeft(QPointF(x, y));
+        m_selectedImageBounds = bounds;
         viewport()->update();
         return;
     }
@@ -2990,17 +3232,25 @@ void PageView::mouseMoveEvent(QMouseEvent *event)
     }
 
     if (!m_textTool && !m_drawTool && !m_imageAwaiting && !m_editor) {
-        const int handle = textAnnotationResizeHandleAt(pos);
-        if (handle >= 0) {
-            viewport()->setCursor((handle == 0 || handle == 3)
+        const int imageHandle = imageStampResizeHandleAt(pos);
+        if (imageHandle >= 0) {
+            viewport()->setCursor((imageHandle == 0 || imageHandle == 3)
                                       ? Qt::SizeFDiagCursor : Qt::SizeBDiagCursor);
-        } else if (selectedTextAnnotationViewportBounds().contains(QPointF(pos))) {
+        } else if (selectedImageViewportBounds().contains(QPointF(pos))) {
             viewport()->setCursor(Qt::SizeAllCursor);
         } else {
-            viewport()->setCursor(hoveredLink.isValid()
-                                      ? Qt::PointingHandCursor
-                                      : pageAtViewportPoint(pos) >= 0
-                                            ? Qt::IBeamCursor : Qt::ArrowCursor);
+            const int handle = textAnnotationResizeHandleAt(pos);
+            if (handle >= 0) {
+                viewport()->setCursor((handle == 0 || handle == 3)
+                                          ? Qt::SizeFDiagCursor : Qt::SizeBDiagCursor);
+            } else if (selectedTextAnnotationViewportBounds().contains(QPointF(pos))) {
+                viewport()->setCursor(Qt::SizeAllCursor);
+            } else {
+                viewport()->setCursor(hoveredLink.isValid()
+                                          ? Qt::PointingHandCursor
+                                          : pageAtViewportPoint(pos) >= 0
+                                                ? Qt::IBeamCursor : Qt::ArrowCursor);
+            }
         }
     }
     QAbstractScrollArea::mouseMoveEvent(event);
@@ -3045,6 +3295,37 @@ void PageView::mouseReleaseEvent(QMouseEvent *event)
                                              m_textAnnotationResizeOriginalBounds,
                                              m_selectedTextAnnotationBounds,
                                              m_selectedTextAnnotationStyle);
+        }
+        return;
+    }
+
+    if (m_movingImageStamp && event->button() == Qt::LeftButton) {
+        m_movingImageStamp = false;
+        viewport()->setCursor(Qt::ArrowCursor);
+        if (m_selectedImageBounds != m_imageStampOriginalBounds) {
+            m_pendingImageStampPreview = {
+                m_selectedImagePage, m_imageStampOriginalBounds,
+                m_selectedImageBounds, m_selectedImagePixmap
+            };
+            emit imageStampBoundsChanged(m_selectedImagePage, m_selectedImageId,
+                                         m_imageStampOriginalBounds,
+                                         m_selectedImageBounds);
+        }
+        return;
+    }
+
+    if (m_resizingImageStamp && event->button() == Qt::LeftButton) {
+        m_resizingImageStamp = false;
+        m_imageStampResizeCorner = -1;
+        viewport()->setCursor(Qt::ArrowCursor);
+        if (m_selectedImageBounds != m_imageStampOriginalBounds) {
+            m_pendingImageStampPreview = {
+                m_selectedImagePage, m_imageStampOriginalBounds,
+                m_selectedImageBounds, m_selectedImagePixmap
+            };
+            emit imageStampBoundsChanged(m_selectedImagePage, m_selectedImageId,
+                                         m_imageStampOriginalBounds,
+                                         m_selectedImageBounds);
         }
         return;
     }

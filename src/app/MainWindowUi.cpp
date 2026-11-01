@@ -55,6 +55,15 @@ void MainWindow::setupViewer()
             m_deleteTextAction->setEnabled(
                 selected && m_editor != nullptr && !m_documentLoadPending);
     });
+    connect(m_view, &PageView::imageStampBoundsChanged,
+            this, &MainWindow::updateImageStampBounds);
+    connect(m_view, &PageView::imageStampDeleteRequested,
+            this, &MainWindow::deleteImageStamp);
+    connect(m_view, &PageView::imageStampSelectionChanged, this, [this](bool selected) {
+        if (m_deleteImageAction)
+            m_deleteImageAction->setEnabled(
+                selected && m_editor != nullptr && !m_documentLoadPending);
+    });
     connect(m_view, &PageView::textToolFinished, this, [this]() {
         m_addTextAction->setChecked(false);
     });
@@ -123,6 +132,15 @@ void MainWindow::setupViewer()
             style->sizePoints = fontSize;
             style->color = color;
             return true;
+        });
+    m_view->setImageStampHandler(
+        [this](int page, const QPointF &point, PdfEditor::ImageStamp *stamp) {
+            if (!m_editor)
+                return false;
+            const bool found = m_editor->imageStampAt(page, point, stamp);
+            if (!found && !m_editor->lastError().isEmpty())
+                QMessageBox::warning(this, "Select added image", m_editor->lastError());
+            return found;
         });
     m_view->setInkStrokeHandler(
         [this](int page, QVector<PageView::Stroke> *strokes) {
@@ -457,6 +475,13 @@ void MainWindow::setupImageToolbar()
     m_cropImageAction->setEnabled(false);
     connect(m_cropImageAction, &QAction::toggled,
             m_view, &PageView::setImageCropMode);
+
+    m_deleteImageAction = toolbar->addAction("Delete");
+    m_deleteImageAction->setIcon(QIcon(":/icons/deletetext.png"));
+    m_deleteImageAction->setEnabled(false);
+    m_deleteImageAction->setToolTip("Delete selected added image");
+    connect(m_deleteImageAction, &QAction::triggered,
+            m_view, &PageView::deleteSelectedImageStamp);
 
     m_cancelImageAction = toolbar->addAction("Cancel");
     m_cancelImageAction->setIcon(QIcon(":/icons/cancelimage.png"));

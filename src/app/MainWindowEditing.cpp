@@ -347,6 +347,41 @@ void MainWindow::updateTextAnnotationBounds(int page, int annotationId,
         m_view->preserveTextAnnotationChange(page, oldBounds, bounds, text, style);
 }
 
+void MainWindow::updateImageStampBounds(int page, const QString &id,
+                                        const QRectF &oldBounds,
+                                        const QRectF &bounds)
+{
+    Q_UNUSED(oldBounds);
+    if (!m_editor)
+        return;
+    EditOperationGuard operation(this);
+
+    if (!m_editor->setImageStampBounds(page, id, bounds)) {
+        QMessageBox::warning(this, "Move or resize image failed", m_editor->lastError());
+        reopenEditor(m_history.current());
+        updateActions();
+        return;
+    }
+    if (refreshAfterPageEdit({ page }, page))
+        statusBar()->showMessage("Updated added image.", 3000);
+}
+
+void MainWindow::deleteImageStamp(int page, const QString &id)
+{
+    if (!m_editor)
+        return;
+    EditOperationGuard operation(this);
+
+    if (!m_editor->deleteImageStamp(page, id)) {
+        QMessageBox::warning(this, "Delete added image", m_editor->lastError());
+        reopenEditor(m_history.current());
+        updateActions();
+        return;
+    }
+    if (refreshAfterPageEdit({ page }, page))
+        statusBar()->showMessage("Deleted added image.", 3000);
+}
+
 void MainWindow::addImage()
 {
     if (!m_editor)

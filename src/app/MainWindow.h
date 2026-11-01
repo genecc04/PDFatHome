@@ -103,6 +103,9 @@ private:
                                     const QRectF &oldBounds, const QRectF &newBounds,
                                     const PageView::TextStyle &style);
     void deleteTextAnnotation(int page, int annotationId, const QString &text);
+    void updateImageStampBounds(int page, const QString &id, const QRectF &oldBounds,
+                                const QRectF &newBounds);
+    void deleteImageStamp(int page, const QString &id);
     bool refreshAfterEdit(int page, const QList<int> &reselect = {},
                           const QVector<QSizeF> &pageSizes = {},
                           bool preserveRasterPreviews = false);
@@ -158,6 +161,7 @@ private:
     QAction *m_highlightAction = nullptr;
     QAction *m_addTextAction = nullptr;
     QAction *m_deleteTextAction = nullptr;
+    QAction *m_deleteImageAction = nullptr;
     QAction *m_rotateLeftAction = nullptr;
     QAction *m_rotateRightAction = nullptr;
     QAction *m_deletePageAction = nullptr;

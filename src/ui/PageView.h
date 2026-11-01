@@ -86,6 +86,7 @@ public:
     int currentPage() const { return m_currentPage; }
     bool hasSelectedTextAnnotation() const { return m_selectedTextAnnotationPage >= 0; }
     QRectF selectedTextAnnotationBounds() const { return m_selectedTextAnnotationBounds; }
+    bool hasSelectedImageStamp() const { return m_selectedImagePage >= 0; }
     bool hasActiveImagePlacement() const { return m_imageAwaiting || m_imageActive; }
     bool hasPositionedImage() const { return m_imageActive; }
     void jumpToPage(int page, const QPointF &location = QPointF());
@@ -104,9 +105,12 @@ public:
     void setTextAnnotationHandler(
         const std::function<bool(int, const QPointF &, int *, QRectF *, QString *,
                                  TextStyle *)> &handler);
+    void setImageStampHandler(
+        const std::function<bool(int, const QPointF &, PdfEditor::ImageStamp *)> &handler);
     void refreshSelectedTextAnnotation();
     void editTextAnnotationInline(int page, int annotationId, const QString &text);
     void deleteSelectedTextAnnotation();
+    void deleteSelectedImageStamp();
     void setFormFields(int page, const QVector<FormField> &fields);
     void clearFormFieldOverlays();
     bool hasPendingChanges() const;
@@ -155,6 +159,10 @@ signals:
                                      const QRectF &oldBounds, const QRectF &newBounds,
                                      const PageView::TextStyle &style);
     void textAnnotationSelectionChanged(bool selected);
+    void imageStampBoundsChanged(int page, const QString &id,
+                                 const QRectF &oldBounds, const QRectF &newBounds);
+    void imageStampDeleteRequested(int page, const QString &id);
+    void imageStampSelectionChanged(bool selected);
     void imagePlaced(int page, const QRectF &boxPoints, const QImage &image);
     void imagePlacementStateChanged(bool active, bool positioned);
     void imageCropModeChanged(bool active);
@@ -191,6 +199,13 @@ private:
         QRectF newBounds;
         QString text;
         TextStyle style;
+    };
+
+    struct ImageStampPreview {
+        int page = -1;
+        QRectF oldBounds;
+        QRectF newBounds;
+        QImage image;
     };
 
     struct SelectionPart {
@@ -282,6 +297,10 @@ private:
     void clearSelectedTextAnnotation();
     QRectF selectedTextAnnotationViewportBounds() const;
     int textAnnotationResizeHandleAt(const QPoint &pos) const;
+    void selectImageStamp(int page, const PdfEditor::ImageStamp &stamp);
+    void clearSelectedImageStamp();
+    QRectF selectedImageViewportBounds() const;
+    int imageStampResizeHandleAt(const QPoint &pos) const;
 
     PdfEditor *m_document = nullptr;
     QString m_renderSourcePath;
@@ -360,6 +379,7 @@ private:
     int m_pendingErasedPage = -1;
     QVector<Stroke> m_pendingErasedStrokes;
     TextAnnotationPreview m_pendingTextAnnotationPreview;
+    ImageStampPreview m_pendingImageStampPreview;
     DrawStyle m_drawStyle;
     std::function<bool(int, QVector<Stroke> *)> m_inkStrokeHandler;
     Stroke m_activeStroke;
@@ -396,6 +416,8 @@ private:
     std::function<bool(int, const QPointF &, int *, QRectF *, QString *,
                        TextStyle *)>
         m_textAnnotationHandler;
+    std::function<bool(int, const QPointF &, PdfEditor::ImageStamp *)>
+        m_imageStampHandler;
     int m_selectedTextAnnotationId = 0;
     int m_selectedTextAnnotationPage = -1;
     QRectF m_selectedTextAnnotationBounds;
@@ -406,6 +428,15 @@ private:
     int m_textAnnotationResizeCorner = -1;
     QPointF m_textAnnotationMoveStart;
     QRectF m_textAnnotationResizeOriginalBounds;
+    QString m_selectedImageId;
+    int m_selectedImagePage = -1;
+    QRectF m_selectedImageBounds;
+    QRectF m_imageStampOriginalBounds;
+    QImage m_selectedImagePixmap;
+    bool m_movingImageStamp = false;
+    bool m_resizingImageStamp = false;
+    int m_imageStampResizeCorner = -1;
+    QPointF m_imageStampMoveStart;
     QVector<FormFieldOverlay> m_formFieldOverlays;
     QWidget *m_formEditor = nullptr;
     QLineEdit *m_formLineEditor = nullptr;

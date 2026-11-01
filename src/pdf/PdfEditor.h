@@ -1,5 +1,6 @@
 #pragma once
 #include <QColor>
+#include <QImage>
 #include <QString>
 #include <QList>
 #include <QRectF>
@@ -70,6 +71,12 @@ public:
         double widthPoints = 1.0;
     };
 
+    struct ImageStamp {
+        QString id;
+        QRectF bounds;
+        QImage image;
+    };
+
     PdfEditor();
     ~PdfEditor();
 
@@ -88,6 +95,9 @@ public:
     bool setTextAnnotationBounds(int pageIndex, int annotationId, const QString &text,
                                  const QRectF &bounds);
     bool deleteTextAnnotation(int pageIndex, int annotationId, const QString &text);
+    bool imageStampAt(int pageIndex, const QPointF &point, ImageStamp *stamp);
+    bool setImageStampBounds(int pageIndex, const QString &id, const QRectF &bounds);
+    bool deleteImageStamp(int pageIndex, const QString &id);
 
     bool open(const QString &path, const QString &password = QString());
     QString filePath() const { return m_path; }

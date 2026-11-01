@@ -158,6 +158,7 @@ void MainWindow::updateActions()
     m_cropImageAction->setEnabled(editable && m_view->hasPositionedImage());
     m_cancelImageAction->setEnabled(editable && m_view->hasActiveImagePlacement());
     m_deleteTextAction->setEnabled(editable && m_view->hasSelectedTextAnnotation());
+    m_deleteImageAction->setEnabled(editable && m_view->hasSelectedImageStamp());
 
     m_drawAction->setEnabled(editable);
     if ((!m_editor || m_documentLoadPending) && m_drawAction->isChecked())
