@@ -23,8 +23,7 @@ requirements for distributing a binary.
 
 - Project: [Qt](https://www.qt.io/)
 - Development version and kit: Qt 6.8.0, MSVC 2022, 64-bit.
-- CMake components requested by this project: Widgets, Pdf, and PdfWidgets
-  (with their Qt dependencies).
+- CMake component requested by this project: Widgets (with its Qt dependencies).
 - The packaging run's `windeployqt` output also selected Qt Core, Gui, Network,
   Svg, and Widgets runtime libraries and plugins. The exact deployed set can
   vary with the Qt installation and build.
@@ -35,25 +34,6 @@ requirements for distributing a binary.
   `licenses/GPL-3.0.txt`.
 - General licensing information:
   [Qt licensing](https://www.qt.io/licensing/).
-
-### Qt PDF and PDFium
-
-Qt PDF uses PDFium and includes third-party components associated with the
-Chromium project. Their licenses and required notices are separate from Qt's
-own license and can vary with the exact Qt PDF source and binary package.
-Consult the documentation for the version being used:
-
-- [Qt PDF licensing](https://doc.qt.io/qt-6.8/qtpdf-licensing.html)
-- [PDFium notices in Qt PDF 6.8](https://doc.qt.io/qt-6.8/qtpdf-3rdparty-pdfium.html)
-- [Chromium-project notices in Qt PDF 6.8](https://doc.qt.io/qt-6.8/qtpdf-3rdparty-the-chromium-project.html)
-- [Qt 6.8.0 source archive](https://download.qt.io/archive/qt/6.8/6.8.0/)
-
-The project has not independently inventoried every PDFium/Chromium component
-in the installed Qt 6.8.0 package or copied that package's complete notice set
-into this repository. This is an explicit unresolved item for any binary
-release: inspect the exact Qt 6.8.0 package's accompanying notices and include
-all notices and license texts required for that package. Do not treat the
-upstream documentation links alone as proof that a release archive is complete.
 
 ## MuPDF and vcpkg-built dependencies
 
@@ -114,7 +94,6 @@ is not identified here as third-party material.
 - Before distributing an executable, create and review a dependency inventory
   for the exact build, include all required notices and license texts, and
   address the applicable obligations for the dynamically linked Qt libraries,
-  Qt PDF's PDFium/Chromium components, and statically linked MuPDF and its
-  dependencies.
+  statically linked MuPDF and its dependencies.
 - Recheck this file whenever Qt, vcpkg, MuPDF, the triplet, or enabled features
   change. Do not rely on this development-build snapshot as a release SBOM.

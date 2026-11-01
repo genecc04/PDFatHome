@@ -6,7 +6,10 @@
 #include <QPointF>
 #include <QVector>
 #include <QByteArray>
+#include <QPolygonF>
+#include <QSizeF>
 #include <QStringList>
+#include <QUrl>
 #include <functional>
 
 struct fz_context;
@@ -16,6 +19,34 @@ class PdfEditor
 {
 public:
     enum class FormFieldType { None, Text, CheckBox, RadioButton, ComboBox, ListBox };
+
+    struct Link {
+        QRectF bounds;
+        QUrl url;
+        int page = -1;
+        QPointF location;
+        bool isValid() const { return page >= 0 || !url.isEmpty(); }
+    };
+
+    struct SearchResult {
+        int page = -1;
+        QPointF location;
+        QList<QRectF> rectangles;
+        QString contextBefore;
+        QString contextAfter;
+    };
+
+    struct Bookmark {
+        QString title;
+        int page = -1;
+        QPointF location;
+        QVector<Bookmark> children;
+    };
+
+    struct TextSelection {
+        QString text;
+        QList<QPolygonF> bounds;
+    };
 
     struct FormField {
         FormFieldType type = FormFieldType::None;
@@ -56,7 +87,16 @@ public:
     bool deleteTextAnnotation(int pageIndex, int annotationId, const QString &text);
 
     bool open(const QString &path, const QString &password = QString());
+    QString filePath() const { return m_path; }
     int pageCount();
+    QSizeF pagePointSize(int pageIndex);
+    QVector<QSizeF> pageSizes();
+    QVector<Link> linksOnPage(int pageIndex);
+    QVector<SearchResult> search(const QString &text);
+    QVector<Bookmark> bookmarks();
+    TextSelection selectText(int pageIndex, const QPointF &start,
+                             const QPointF &end, bool snapToWords = false);
+    TextSelection selectWord(int pageIndex, const QPointF &point);
     enum class Encryption { Keep, Remove, Aes256 };
 
     bool saveAs(const QString &path, bool removeUnused = false,
@@ -88,4 +128,5 @@ private:
     fz_context *m_ctx = nullptr;
     pdf_document *m_doc = nullptr;
     QString m_error;
+    QString m_path;
 };

@@ -3,7 +3,7 @@
 #include <QListView>
 
 class QDropEvent;
-class QPdfDocument;
+class PdfEditor;
 class ThumbnailModel;
 
 class ThumbnailPane : public QListView
@@ -12,7 +12,7 @@ class ThumbnailPane : public QListView
 public:
     explicit ThumbnailPane(QWidget *parent = nullptr);
 
-    void setDocument(QPdfDocument *document);
+    void setDocument(PdfEditor *document);
     void invalidatePageRenders(const QList<int> &changedPages = {});
     void setRenderSource(const QString &path, const QString &password);
     void setCurrentPage(int page);

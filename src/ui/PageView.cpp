@@ -1,5 +1,6 @@
 #include "PageView.h"
 #include "MuPdfRenderCache.h"
+#include "SearchResultModel.h"
 
 #include <QAbstractItemModel>
 #include <QApplication>
@@ -20,11 +21,6 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPainterPathStroker>
-#include <QPdfDocument>
-#include <QPdfLink>
-#include <QPdfLinkModel>
-#include <QPdfSearchModel>
-#include <QPdfSelection>
 #include <QPlainTextEdit>
 #include <QPolygonF>
 #include <QPushButton>
@@ -53,6 +49,7 @@ constexpr int kMinLinksForSpatialIndex = 24;
 constexpr int kZoomUpdateIntervalMs = 75;
 constexpr double kMinZoom = 0.1;
 constexpr double kMaxZoom = 4.0;
+constexpr int kMaxPendingPageRenders = 4;
 
 constexpr int kLoadingFrameSize = 64;
 constexpr int kLoadingDisplaySize = 256;
@@ -150,8 +147,6 @@ PageView::PageView(QWidget *parent)
     verticalScrollBar()->setSingleStep(40);
     viewport()->setMouseTracking(true);
     viewport()->installEventFilter(this);
-    m_linkModel = new QPdfLinkModel(this);
-
     m_emptyStateOpenButton = new QPushButton("Open a PDF...", viewport());
     m_emptyStateOpenButton->setObjectName(QStringLiteral("emptyStateOpenButton"));
     m_emptyStateOpenButton->setCursor(Qt::PointingHandCursor);
@@ -215,14 +210,9 @@ PageView::~PageView()
 
 // document and zoom
 
-void PageView::setDocument(QPdfDocument *document)
+void PageView::setDocument(PdfEditor *document)
 {
     m_document = document;
-    m_linkModel->setDocument(document);
-    if (m_document) {
-        connect(m_document, &QPdfDocument::statusChanged, this,
-                [this]() { onDocumentChanged(); });
-    }
     onDocumentChanged();
 }
 
@@ -259,21 +249,6 @@ void PageView::setPageSizeHint(const QVector<QSizeF> &sizes)
 
 // Slow (asks the document for every page's size) but always correct. Used as a
 // safety net when sizes we worked out ourselves turn out to be wrong.
-void PageView::rescanPageSizes()
-{
-    if (!m_document || m_document->status() != QPdfDocument::Status::Ready)
-        return;
-
-    const int count = m_document->pageCount();
-    m_pageSizes.clear();
-    m_pageSizes.reserve(count);
-    for (int i = 0; i < count; ++i)
-        m_pageSizes.append(m_document->pagePointSize(i));
-
-    recalculateLayout(true);
-    viewport()->update();
-}
-
 QRect PageView::loadingIndicatorRect() const
 {
     const int side = kLoadingDisplaySize + 2 * kLoadingCardPadding;
@@ -394,16 +369,17 @@ void PageView::onDocumentChanged()
     m_failedBaseKeys.clear();
     m_pageSizes.clear();
     m_pageLinkCaches.clear();
+    m_searchIndex = -1;
 
-    if (m_document && m_document->status() == QPdfDocument::Status::Ready) {
+    if (m_document) {
         const int count = m_document->pageCount();
-        m_pageLinkCaches.resize(count);
-        if (m_pageSizeHint.size() == count) {
-            m_pageSizes = m_pageSizeHint;
-        } else {
-            m_pageSizes.reserve(count);
-            for (int i = 0; i < count; ++i)
-                m_pageSizes.append(m_document->pagePointSize(i));
+        if (count > 0) {
+            m_pageLinkCaches.resize(count);
+            if (m_pageSizeHint.size() == count) {
+                m_pageSizes = m_pageSizeHint;
+            } else {
+                m_pageSizes = m_document->pageSizes();
+            }
         }
     }
     recalculateLayout(false);
@@ -415,6 +391,7 @@ void PageView::invalidatePendingPageRenders()
     m_renderPool.clear();
     m_pendingPageKeys.clear();
     m_pendingBaseKeys.clear();
+    m_renderRequestsSaturated = false;
 }
 
 void PageView::positionEmptyStateButton()
@@ -426,9 +403,7 @@ void PageView::positionEmptyStateButton()
         (viewport()->width() - buttonSize.width()) / 2,
         viewport()->height() / 2 + 48,
         buttonSize.width(), buttonSize.height());
-    const bool loading = m_loading
-                         || (m_document
-                             && m_document->status() == QPdfDocument::Status::Loading);
+    const bool loading = m_loading;
     m_emptyStateOpenButton->setVisible(m_pageRects.isEmpty() && !loading);
 }
 
@@ -607,10 +582,10 @@ int PageView::pageAtViewportPoint(const QPoint &point) const
     return -1;
 }
 
-const QList<QPdfLink> &PageView::linksOnPage(int page)
+const QVector<PdfEditor::Link> &PageView::linksOnPage(int page)
 {
-    static const QList<QPdfLink> emptyLinks;
-    if (!m_linkModel || page < 0 || page >= m_pageLinkCaches.size())
+    static const QVector<PdfEditor::Link> emptyLinks;
+    if (!m_document || page < 0 || page >= m_pageLinkCaches.size())
         return emptyLinks;
     if (!m_pageLinkCaches.at(page).loaded)
         loadPageLinks(page);
@@ -619,22 +594,17 @@ const QList<QPdfLink> &PageView::linksOnPage(int page)
 
 void PageView::loadPageLinks(int page)
 {
-    m_linkModel->setPage(page);
     PageLinkCache &cache = m_pageLinkCaches[page];
-    const int linkCount = m_linkModel->rowCount(QModelIndex());
-    cache.links.reserve(linkCount);
-    for (int row = 0; row < linkCount; ++row) {
-        const QPdfLink link = m_linkModel->data(
-            m_linkModel->index(row, 0),
-            int(QPdfLinkModel::Role::Link)).value<QPdfLink>();
-        const int linkIndex = cache.links.size();
-        cache.links.append(link);
-        for (const QRectF &bounds : link.rectangles()) {
-            LinkHitRegion region;
-            region.bounds = bounds;
-            region.linkIndex = linkIndex;
-            cache.regions.append(region);
-        }
+    cache.links = m_document->linksOnPage(page);
+    if (!m_document->lastError().isEmpty()) {
+        qWarning().noquote() << "Could not load links for page" << page + 1
+                             << ":" << m_document->lastError();
+    }
+    for (int row = 0; row < cache.links.size(); ++row) {
+        LinkHitRegion region;
+        region.bounds = cache.links.at(row).bounds;
+        region.linkIndex = row;
+        cache.regions.append(region);
     }
 
     if (cache.regions.size() >= kMinLinksForSpatialIndex) {
@@ -659,14 +629,14 @@ void PageView::loadPageLinks(int page)
     cache.loaded = true;
 }
 
-QPdfLink PageView::linkAtViewportPoint(const QPoint &point)
+PdfEditor::Link PageView::linkAtViewportPoint(const QPoint &point)
 {
     const int page = pageAtViewportPoint(point);
     if (page < 0)
-        return QPdfLink();
+        return {};
 
     const QPointF pagePoint = pagePointFor(page, point);
-    const QList<QPdfLink> &links = linksOnPage(page);
+    const QVector<PdfEditor::Link> &links = linksOnPage(page);
     const PageLinkCache &cache = m_pageLinkCaches.at(page);
     if (!cache.cells.isEmpty()) {
         const QSizeF pageSize = m_pageSizes.at(page);
@@ -681,14 +651,14 @@ QPdfLink PageView::linkAtViewportPoint(const QPoint &point)
             if (region.bounds.contains(pagePoint))
                 return links.at(region.linkIndex);
         }
-        return QPdfLink();
+        return {};
     }
 
     for (const LinkHitRegion &region : cache.regions) {
         if (region.bounds.contains(pagePoint))
             return links.at(region.linkIndex);
     }
-    return QPdfLink();
+    return {};
 }
 
 void PageView::setHoveredLink(const QUrl &url)
@@ -730,7 +700,7 @@ QPointF PageView::pagePointFor(int page, const QPoint &viewportPos) const
 
 // search results
 
-void PageView::setSearchModel(QPdfSearchModel *model)
+void PageView::setSearchModel(SearchResultModel *model)
 {
     m_search = model;
     if (!m_search)
@@ -747,16 +717,14 @@ void PageView::setCurrentSearchResultIndex(int index)
 }
 
 void PageView::drawSearchResults(QPainter &painter, int page, const QRect &pageRect,
-                                 const QPdfLink &current)
+                                 const PdfEditor::SearchResult &current)
 {
     if (!m_search)
         return;
-    const QList<QPdfLink> results = m_search->resultsOnPage(page);
-    for (const QPdfLink &link : results) {
-        const bool isCurrent = current.isValid() && current.page() == page
-                               && current.location() == link.location();
-        const QList<QRectF> rects = link.rectangles();
-        for (const QRectF &r : rects) {
+    const QVector<PdfEditor::SearchResult> results = m_search->resultsOnPage(page);
+    for (const PdfEditor::SearchResult &result : results) {
+        const bool isCurrent = current.page == page && current.location == result.location;
+        for (const QRectF &r : result.rectangles) {
             const QRectF px(pageRect.x() + r.x() * m_scale, pageRect.y() + r.y() * m_scale,
                             r.width() * m_scale, r.height() * m_scale);
             painter.fillRect(px, isCurrent ? QColor(255, 140, 0, 110) : QColor(255, 235, 0, 100));
@@ -883,7 +851,9 @@ QPixmap PageView::pageImage(int page, const QSize &size, qreal dpr,
     if (failedKeys.contains(key))
         return QPixmap();
 
-    if (!pendingKeys.contains(key)) {
+    if (!pendingKeys.contains(key)
+        && m_pendingPageKeys.size() + m_pendingBaseKeys.size()
+               < kMaxPendingPageRenders) {
         pendingKeys.insert(key);
         const quint64 generation = m_renderGeneration;
         const QString sourcePath = m_renderSourcePath;
@@ -937,9 +907,15 @@ QPixmap PageView::pageImage(int page, const QSize &size, qreal dpr,
                             viewport()->update(
                                 m_pageRects.at(page).translated(-offset));
                         }
+                        if (m_renderRequestsSaturated) {
+                            m_renderRequestsSaturated = false;
+                            viewport()->update();
+                        }
                     },
                     Qt::QueuedConnection);
             }), priority);
+    } else if (!pendingKeys.contains(key)) {
+        m_renderRequestsSaturated = true;
     }
 
     const QList<quint64> candidates = cache.keys();
@@ -990,9 +966,7 @@ void PageView::drawStroke(QPainter &painter, const Stroke &stroke, const QRect &
 void PageView::paintEvent(QPaintEvent *event)
 {
     QPainter painter(viewport());
-    const bool loading = m_loading
-                         || (m_document
-                             && m_document->status() == QPdfDocument::Status::Loading);
+    const bool loading = m_loading;
     if (m_pageRects.isEmpty()) {
         painter.fillRect(event->rect(), QColor(245, 247, 250));
         if (!loading) {
@@ -1027,7 +1001,7 @@ void PageView::paintEvent(QPaintEvent *event)
     const QRect visible(offset, viewport()->size());
     const qreal dpr = devicePixelRatioF();
 
-    QPdfLink current;
+    PdfEditor::SearchResult current;
     if (m_search && m_searchIndex >= 0
         && m_searchIndex < m_search->rowCount(QModelIndex())) {
         current = m_search->resultAtIndex(m_searchIndex);
@@ -1275,12 +1249,13 @@ void PageView::updateSelection()
         const QPointF start = (page == firstPage) ? a : QPointF(0, 0);
         const QPointF end = (page == lastPage) ? b : QPointF(size.width(), size.height());
 
-        const QPdfSelection selection = m_document->getSelection(page, start, end);
-        if (selection.isValid() && !selection.text().isEmpty()) {
+        const PdfEditor::TextSelection selection =
+            m_document->selectText(page, start, end);
+        if (!selection.text.isEmpty()) {
             SelectionPart part;
             part.page = page;
-            part.bounds = selection.bounds();
-            part.text = selection.text();
+            part.bounds = selection.bounds;
+            part.text = selection.text;
             m_selection.append(part);
         }
     }
@@ -1309,75 +1284,15 @@ void PageView::selectWordAt(int page, const QPointF &point)
     if (!m_document || page < 0 || page >= m_pageSizes.size())
         return;
 
-    const QSizeF pageSize = m_pageSizes.at(page);
-    const qreal radius = qMax(1.0, 2.0 / m_scale);
-    const QPdfSelection nearby = m_document->getSelection(
-        page, QPointF(qMax(0.0, point.x() - radius), point.y()),
-        QPointF(qMin(pageSize.width(), point.x() + radius), point.y()));
-    if (!nearby.isValid() || nearby.text().isEmpty())
-        return;
-    int wordIndex = -1;
-    qreal nearestDistance = std::numeric_limits<qreal>::max();
-    for (int offset = 0; offset < nearby.text().size(); ++offset) {
-        const int index = nearby.startIndex() + offset;
-        const QPdfSelection character = m_document->getSelectionAtIndex(page, index, 1);
-        for (const QPolygonF &polygon : character.bounds()) {
-            const QRectF bounds = polygon.boundingRect();
-            const qreal dx = qMax(qMax(bounds.left() - point.x(), 0.0),
-                                  point.x() - bounds.right());
-            const qreal dy = qMax(qMax(bounds.top() - point.y(), 0.0),
-                                  point.y() - bounds.bottom());
-            const qreal distance = dx * dx + dy * dy;
-            if (distance < nearestDistance) {
-                nearestDistance = distance;
-                wordIndex = index;
-            }
-        }
-    }
-    if (wordIndex < 0)
-        return;
-
-    const auto isWordCharacter = [](const QString &text) {
-        if (text.isEmpty())
-            return false;
-        const QChar character = text.at(0);
-        const QChar::Category category = character.category();
-        return character.isLetterOrNumber() || character == QLatin1Char('_')
-               || category == QChar::Mark_NonSpacing
-               || category == QChar::Mark_SpacingCombining
-               || category == QChar::Mark_Enclosing;
-    };
-
-    constexpr int contextRadius = 256;
-    const int contextStart = qMax(0, wordIndex - contextRadius);
-    const QPdfSelection context = m_document->getSelectionAtIndex(
-        page, contextStart, contextRadius * 2 + 1);
-    const QString contextText = context.text();
-    const int contextIndex = wordIndex - context.startIndex();
-    if (!context.isValid() || contextIndex < 0 || contextIndex >= contextText.size()
-        || !isWordCharacter(contextText.mid(contextIndex, 1)))
-        return;
-
-    int wordStart = contextIndex;
-    while (wordStart > 0
-           && isWordCharacter(contextText.mid(wordStart - 1, 1)))
-        --wordStart;
-
-    int wordEnd = contextIndex + 1;
-    while (wordEnd < contextText.size()
-           && isWordCharacter(contextText.mid(wordEnd, 1)))
-        ++wordEnd;
-
-    const QPdfSelection word = m_document->getSelectionAtIndex(
-        page, context.startIndex() + wordStart, wordEnd - wordStart);
-    if (!word.isValid() || word.text().isEmpty())
+    const PdfEditor::TextSelection word = m_document->selectWord(page, point);
+    if (word.text.isEmpty())
         return;
 
     m_selection.clear();
     SelectionPart part;
     part.page = page;
-    part.bounds = word.bounds();
-    part.text = word.text();
+    part.bounds = word.bounds;
+    part.text = word.text;
     m_selection.append(part);
     m_selStartPage = page;
     m_selEndPage = page;
@@ -2184,13 +2099,14 @@ void PageView::mousePressEvent(QMouseEvent *event)
                 return;
             }
         }
-        const QPdfLink link = page >= 0 ? linkAtViewportPoint(pos) : QPdfLink();
-        if (link.isValid() || !link.url().isEmpty()) {
+        const PdfEditor::Link link = page >= 0 ? linkAtViewportPoint(pos)
+                                               : PdfEditor::Link();
+        if (link.isValid()) {
             m_pressedLinkPage = page;
             m_linkPressPos = pos;
-            m_pressedLinkUrl = link.url();
-            m_pressedLinkDestinationPage = link.page();
-            m_pressedLinkLocation = link.location();
+            m_pressedLinkUrl = link.url;
+            m_pressedLinkDestinationPage = link.page;
+            m_pressedLinkLocation = link.location;
             event->accept();
             return;
         }
@@ -2253,9 +2169,8 @@ void PageView::mouseDoubleClickEvent(QMouseEvent *event)
 void PageView::mouseMoveEvent(QMouseEvent *event)
 {
     const QPoint pos = event->position().toPoint();
-    const QPdfLink hoveredLink = linkAtViewportPoint(pos);
-    const bool overLink = hoveredLink.isValid() || !hoveredLink.url().isEmpty();
-    setHoveredLink(overLink ? hoveredLink.url() : QUrl());
+    const PdfEditor::Link hoveredLink = linkAtViewportPoint(pos);
+    setHoveredLink(hoveredLink.url);
 
     if (m_pressedLinkPage >= 0) {
         if ((pos - m_linkPressPos).manhattanLength() >= QApplication::startDragDistance())
@@ -2410,7 +2325,7 @@ void PageView::mouseMoveEvent(QMouseEvent *event)
         } else if (selectedTextAnnotationViewportBounds().contains(QPointF(pos))) {
             viewport()->setCursor(Qt::SizeAllCursor);
         } else {
-            viewport()->setCursor(overLink
+            viewport()->setCursor(hoveredLink.isValid()
                                       ? Qt::PointingHandCursor
                                       : pageAtViewportPoint(pos) >= 0
                                             ? Qt::IBeamCursor : Qt::ArrowCursor);

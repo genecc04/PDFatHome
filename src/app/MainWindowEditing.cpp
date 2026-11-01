@@ -14,7 +14,6 @@
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMessageBox>
-#include <QPdfDocument>
 #include <QProgressDialog>
 #include <QStatusBar>
 
@@ -527,11 +526,7 @@ void MainWindow::stepHistory(const QString &path)
         return;
 
     m_view->clearFormFieldOverlays();
-    if (!reopenEditor(path)) {
-        QMessageBox::warning(this, "Editing", "Editing is no longer available for this file.");
-    } else {
-        refreshFormFieldOverlays();
-    }
+    refreshFormFieldOverlays();
 
     updateActions();
     updateTitle();

@@ -18,7 +18,6 @@
 #include <QLabel>
 #include <QMenu>
 #include <QMenuBar>
-#include <QPdfDocument>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSignalBlocker>
@@ -37,8 +36,6 @@ constexpr int kNumericControlWidth = 88;
 
 void MainWindow::setupViewer()
 {
-    m_document = new QPdfDocument(this);
-
     m_view = new PageView(this);
     m_view->setDocument(m_document);
     m_view->setZoomMode(PageView::ZoomMode::FitToWidth);
@@ -423,16 +420,6 @@ void MainWindow::setupToolbar()
         QSignalBlocker blocker(m_pageBox);
         m_pageBox->setValue(page + 1);
     });
-    connect(m_document, &QPdfDocument::pageCountChanged, this, [this](int count) {
-        QSignalBlocker blocker(m_pageBox);
-        m_pageBox->setRange(count > 0 ? 1 : 0, count);
-        m_pageCountLabel->setText(QString(" / %1 ").arg(count));
-        restorePendingPage();
-    });
-    connect(m_document, &QPdfDocument::statusChanged, this, [this]() {
-        restorePendingPage();
-    });
-
     connect(zoomInAction, &QAction::triggered, this, [this]() {
         m_view->setZoomFactor(m_view->zoomFactor() * 1.25);
     });

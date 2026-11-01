@@ -1,5 +1,7 @@
 #include "MainWindow.h"
+#include "BookmarkPane.h"
 #include "PdfEditor.h"
+#include "SearchPane.h"
 #include "ThumbnailPane.h"
 
 #include <QAction>
@@ -10,14 +12,16 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QInputDialog>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QMimeData>
-#include <QPdfDocument>
 #include <QRunnable>
 #include <QSettings>
+#include <QSignalBlocker>
+#include <QSpinBox>
 #include <QStatusBar>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
@@ -144,7 +148,6 @@ void MainWindow::loadDocument(const QString &path)
         return;
 
     m_documentLoadPending = true;
-    m_pendingPage = -1;
     m_view->setLoading(true);
     updateActions();
 
@@ -159,34 +162,41 @@ void MainWindow::startDocumentLoad(const QString &path, const QString &password,
 {
     m_documentLoadPool.start(QRunnable::create(
         [this, path, password, firstAttempt, workingPath]() {
-            if (m_closing)
-                return;
-
             auto result = std::make_shared<DocumentLoadResult>();
+            const auto stopIfClosing = [this, &result, &workingPath]() {
+                if (!m_closing)
+                    return false;
+                if (result->workingCopyCreated)
+                    QFile::remove(workingPath);
+                return true;
+            };
+            if (stopIfClosing())
+                return;
 
             PdfEditor probe;
             if (!probe.open(path, password)) {
                 result->error = probe.lastError();
                 result->passwordRejected =
                     result->error == QStringLiteral("Incorrect or missing password");
-            } else if (m_closing) {
+            } else if (stopIfClosing()) {
                 return;
             } else if (workingPath.isEmpty() || !QFile::copy(path, workingPath)) {
                 result->error = QStringLiteral("Could not create a working copy of the PDF.");
             } else {
                 result->workingCopyCreated = true;
-                if (m_closing)
+                if (stopIfClosing())
                     return;
                 auto editor = std::make_unique<PdfEditor>();
                 if (!editor->open(workingPath, password)) {
                     result->error = editor->lastError();
                 } else {
+                    result->pageSizes = editor->pageSizes();
                     const int pages = editor->pageCount();
                     if (pages >= 0) {
                         result->formFields.resize(pages);
                         result->formFieldsLoaded = true;
                         for (int i = 0; i < pages; ++i) {
-                            if (m_closing)
+                            if (stopIfClosing())
                                 return;
                             if (!editor->formFieldsOnPage(i, &result->formFields[i])) {
                                 result->formFieldsLoaded = false;
@@ -198,23 +208,8 @@ void MainWindow::startDocumentLoad(const QString &path, const QString &password,
                 }
             }
 
-            if (m_closing)
+            if (stopIfClosing())
                 return;
-
-            if (result->workingCopyCreated) {
-                QPdfDocument sizeDocument;
-                sizeDocument.setPassword(password);
-                if (sizeDocument.load(workingPath) == QPdfDocument::Error::None
-                    && sizeDocument.status() == QPdfDocument::Status::Ready) {
-                    const int count = sizeDocument.pageCount();
-                    result->pageSizes.reserve(count);
-                    for (int i = 0; i < count; ++i) {
-                        if (m_closing)
-                            return;
-                        result->pageSizes.append(sizeDocument.pagePointSize(i));
-                    }
-                }
-            }
 
             QMetaObject::invokeMethod(
                 this,
@@ -260,10 +255,21 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
 
     m_password = password;
     m_view->stepLoading();
+    std::unique_ptr<PdfEditor> previousEditor = std::move(m_editor);
+    m_editor = std::move(result->editor);
+    m_document = m_editor.get();
+    if (!result->pageSizes.isEmpty())
+        m_pageSizeCache.insert(working, result->pageSizes);
     m_view->setPageSizeHint(result->pageSizes);
     const bool shown = showFile(working, 0, false);
     m_view->setPageSizeHint(QVector<QSizeF>());
     if (!shown) {
+        m_editor.swap(previousEditor);
+        m_document = m_editor.get();
+        m_view->setDocument(m_document);
+        m_thumbnails->setDocument(m_document);
+        m_search->setDocument(m_document);
+        m_bookmarks->setDocument(m_document);
         m_password = previousPassword;
         if (!previousState.isEmpty() && !showFile(previousState, previousPage, false)) {
             QMessageBox::warning(
@@ -281,7 +287,6 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
     m_view->stepLoading();
 
     m_view->clearFormFieldOverlays();
-    m_editor.reset();
     removeSnapshots(m_history.states());
     m_history.clear();
     m_currentPath = path;
@@ -292,13 +297,10 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
     m_history.reset(working);
     m_view->stepLoading();
 
-    if (result->editor) {
-        m_editor = std::move(result->editor);
-        if (result->formFieldsLoaded)
-            refreshFormFieldOverlays(&result->formFields);
-        else
-            refreshFormFieldOverlays();
-    }
+    if (result->formFieldsLoaded)
+        refreshFormFieldOverlays(&result->formFields);
+    else
+        refreshFormFieldOverlays();
 
     const QString editorError = result->error;
     endLoading();
@@ -315,6 +317,8 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
 
 void MainWindow::goToPage(int page)
 {
+    if (!m_document)
+        return;
     const int pageCount = m_document->pageCount();
     if (pageCount <= 0 || page < 0 || page >= pageCount)
         return;
@@ -323,63 +327,67 @@ void MainWindow::goToPage(int page)
 
 bool MainWindow::showFile(const QString &path, int page, bool reportErrors)
 {
-    m_pendingPage = -1;
     clearPageRenderCaches();
-    m_document->close();
-    m_document->setPassword(m_password);
+    std::unique_ptr<PdfEditor> replacement;
+    PdfEditor *document = m_editor.get();
+    if (!document || document->filePath() != path) {
+        replacement = std::make_unique<PdfEditor>();
+        if (!replacement->open(path, m_password)) {
+            const QString error = replacement->lastError();
+            if (reportErrors)
+                QMessageBox::warning(this, "Error",
+                                     QString("Could not display the document:\n\n%1")
+                                         .arg(error));
+            return false;
+        }
+        document = replacement.get();
+    }
 
-    const auto knownSizes = m_pageSizeCache.constFind(path);
-    const bool primed = knownSizes != m_pageSizeCache.constEnd();
-    if (primed)
-        m_view->setPageSizeHint(knownSizes.value());
-
-    const QPdfDocument::Error error = m_document->load(path);
-    if (primed)
-        m_view->setPageSizeHint(QVector<QSizeF>());
-    if (error != QPdfDocument::Error::None) {
+    const int pageCount = document->pageCount();
+    if (pageCount < 0) {
         if (reportErrors) {
-            QString reason;
-            switch (error) {
-            case QPdfDocument::Error::IncorrectPassword:
-                reason = "incorrect password"; break;
-            case QPdfDocument::Error::InvalidFileFormat:
-                reason = "invalid file format"; break;
-            case QPdfDocument::Error::UnsupportedSecurityScheme:
-                reason = "unsupported security scheme"; break;
-            case QPdfDocument::Error::FileNotFound:
-                reason = "file not found"; break;
-            default:
-                reason = "unknown error"; break;
-            }
-            QMessageBox::warning(this, "Error",
-                                 QString("Could not display the document (%1).").arg(reason));
+            QMessageBox::warning(this, "Error", document->lastError());
         }
         return false;
     }
+
+    const auto knownSizes = m_pageSizeCache.constFind(path);
+    QVector<QSizeF> pageSizes = knownSizes != m_pageSizeCache.constEnd()
+                                    ? knownSizes.value() : QVector<QSizeF>();
+    if (pageSizes.size() != pageCount)
+        pageSizes = document->pageSizes();
+    if (pageCount > 0 && pageSizes.size() != pageCount) {
+        if (reportErrors) {
+            const QString error = document->lastError().isEmpty()
+                                      ? QStringLiteral("Could not read page dimensions.")
+                                      : document->lastError();
+            QMessageBox::warning(this, "Error", error);
+        }
+        return false;
+    }
+
+    if (replacement) {
+        m_editor.swap(replacement);
+        m_document = m_editor.get();
+    }
+    m_view->setPageSizeHint(pageSizes);
+    m_view->setDocument(m_document);
+    m_view->setPageSizeHint(QVector<QSizeF>());
+    m_thumbnails->setDocument(m_document);
+    m_search->setDocument(m_document);
+    m_bookmarks->setDocument(m_document);
     m_view->setRenderSource(path, m_password);
     m_thumbnails->setRenderSource(path, m_password);
 
-    const int pageCount = m_document->pageCount();
+    {
+        QSignalBlocker blocker(m_pageBox);
+        m_pageBox->setRange(pageCount > 0 ? 1 : 0, pageCount);
+        m_pageCountLabel->setText(QString(" / %1 ").arg(pageCount));
+    }
     if (pageCount <= 0) {
-        m_pendingPage = qMax(0, page);
         return true;
     }
-    m_pendingPage = -1;
     const int target = qBound(0, page, pageCount - 1);
-
-    if (primed) {
-        const QVector<QSizeF> shown = m_view->pageSizes();
-        const int samples[] = { 0, pageCount / 2, pageCount - 1, target };
-        for (const int index : samples) {
-            const QSizeF real = m_document->pagePointSize(index);
-            if (index >= shown.size()
-                || qAbs(real.width() - shown.at(index).width()) > 0.5
-                || qAbs(real.height() - shown.at(index).height()) > 0.5) {
-                m_view->rescanPageSizes();
-                break;
-            }
-        }
-    }
 
     if (isTempFile(path) && m_view->pageSizes().size() == pageCount) {
         if (m_pageSizeCache.size() > 64)
@@ -390,21 +398,6 @@ bool MainWindow::showFile(const QString &path, int page, bool reportErrors)
     goToPage(target);
     m_thumbnails->setCurrentPage(target);
     return true;
-}
-
-void MainWindow::restorePendingPage()
-{
-    if (m_pendingPage < 0
-        || m_document->status() != QPdfDocument::Status::Ready
-        || m_document->pageCount() <= 0)
-        return;
-
-    const int target = qMin(m_pendingPage, m_document->pageCount() - 1);
-    m_pendingPage = -1;
-    goToPage(target);
-    m_thumbnails->setCurrentPage(target);
-    if (m_editor)
-        refreshFormFieldOverlays();
 }
 
 void MainWindow::clearPageRenderCaches()
@@ -561,14 +554,17 @@ bool MainWindow::save()
         }
     }
 
+    m_view->setDocument(nullptr);
+    m_thumbnails->setDocument(nullptr);
+    m_search->setDocument(nullptr);
+    m_bookmarks->setDocument(nullptr);
+    m_document = nullptr;
     m_editor.reset();
-    m_document->close();
 
     QString replacementMessage;
     if (!replaceFile(tmp, target, &replacementMessage)) {
         QFile::remove(tmp);
         showFile(m_history.current(), page, false);
-        reopenEditor(m_history.current());
         updateActions();
         QMessageBox::warning(this, "Save failed", replacementMessage);
         return false;
@@ -616,7 +612,6 @@ bool MainWindow::refreshAfterEdit(int page, const QList<int> &reselect,
     if (!showFile(newPath, page)) {
         QFile::remove(newPath);
         showFile(m_history.current(), page, false);
-        reopenEditor(m_history.current());
         updateActions();
         return false;
     }
@@ -625,8 +620,7 @@ bool MainWindow::refreshAfterEdit(int page, const QList<int> &reselect,
         m_thumbnails->selectPages(reselect);
 
     removeSnapshots(m_history.push(newPath));
-    if (reopenEditor(newPath))
-        refreshFormFieldOverlays();
+    refreshFormFieldOverlays();
     updateActions();
     updateTitle();
     return true;

@@ -15,7 +15,6 @@
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMessageBox>
-#include <QPdfDocument>
 #include <QSettings>
 #include <QSpinBox>
 #include <QStatusBar>
@@ -49,8 +48,6 @@ MainWindow::MainWindow(QWidget *parent)
 MainWindow::~MainWindow()
 {
     m_documentLoadPool.waitForDone();   // the worker holds `this`; let it finish first
-    m_editor.reset();
-
     if (m_view) {
         m_view->invalidatePageRenders();
         m_view->setDocument(nullptr);
@@ -67,11 +64,8 @@ MainWindow::~MainWindow()
     if (m_bookmarks)
         m_bookmarks->setDocument(nullptr);
 
-    if (m_document) {
-        m_document->close();
-        delete m_document;
-        m_document = nullptr;
-    }
+    m_document = nullptr;
+    m_editor.reset();
 
     if (!m_tempDir.isValid())
         return;
@@ -152,12 +146,32 @@ void MainWindow::updateActions()
 
 bool MainWindow::reopenEditor(const QString &path)
 {
-    m_editor = std::make_unique<PdfEditor>();
-    if (m_editor->open(path, m_password))
-        return true;
+    auto editor = std::make_unique<PdfEditor>();
+    if (!editor->open(path, m_password)) {
+        if (m_view)
+            m_view->setDocument(nullptr);
+        if (m_thumbnails)
+            m_thumbnails->setDocument(nullptr);
+        if (m_search)
+            m_search->setDocument(nullptr);
+        if (m_bookmarks)
+            m_bookmarks->setDocument(nullptr);
+        m_document = nullptr;
+        m_editor.reset();
+        return false;
+    }
 
-    m_editor.reset();
-    return false;
+    m_editor.swap(editor);
+    m_document = m_editor.get();
+    if (m_view)
+        m_view->setDocument(m_document);
+    if (m_thumbnails)
+        m_thumbnails->setDocument(m_document);
+    if (m_search)
+        m_search->setDocument(m_document);
+    if (m_bookmarks)
+        m_bookmarks->setDocument(m_document);
+    return true;
 }
 
 void MainWindow::removeSnapshots(const QStringList &paths)
@@ -288,7 +302,7 @@ bool MainWindow::openWorkingCopy(const QString &source, int page)
 
     m_history.reset(working);
     const bool shown = showFile(working, page);
-    if (!reopenEditor(working) || !shown)
+    if (!shown)
         return shown;
 
     refreshFormFieldOverlays();
@@ -298,8 +312,7 @@ bool MainWindow::openWorkingCopy(const QString &source, int page)
 bool MainWindow::refreshFormFieldOverlays(
     const QVector<QVector<PdfEditor::FormField>> *prefetched)
 {
-    if (!m_editor || !m_document
-        || m_document->status() != QPdfDocument::Status::Ready)
+    if (!m_editor || !m_document)
         return false;
 
     m_view->clearFormFieldOverlays();

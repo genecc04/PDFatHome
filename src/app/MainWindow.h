@@ -20,7 +20,6 @@ class QDragEnterEvent;
 class QDropEvent;
 class QLabel;
 class QMenu;
-class QPdfDocument;
 class QSpinBox;
 class BookmarkPane;
 class SearchPane;
@@ -65,7 +64,6 @@ private:
     void goToPage(int page);
     bool showFile(const QString &path, int page, bool reportErrors = true);
     void clearPageRenderCaches();
-    void restorePendingPage();
     void addRecentFile(const QString &path);
     void setDocumentPassword();
     void removeDocumentPassword();
@@ -120,7 +118,7 @@ private:
     enum class PasswordChange { None, Set, Remove };
     PasswordChange m_passwordChange = PasswordChange::None;
 
-    QPdfDocument *m_document = nullptr;
+    PdfEditor *m_document = nullptr;
     PageView *m_view = nullptr;
     QSpinBox *m_pageBox = nullptr;
     QLabel *m_pageCountLabel = nullptr;
@@ -161,7 +159,6 @@ private:
     QString m_currentPath;
     QString m_displayName;
     QString m_password;
-    int m_pendingPage = -1;
     int m_editCount = 0;
     QHash<QString, QVector<QSizeF>> m_pageSizeCache;
 };

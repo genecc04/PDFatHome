@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Pdf PdfWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets)
 find_package(unofficial-libmupdf CONFIG REQUIRED)
 
 add_executable(PdfApp WIN32
@@ -30,6 +30,8 @@ add_executable(PdfApp WIN32
     src/ui/PageView.h
     src/ui/SearchPane.cpp
     src/ui/SearchPane.h
+    src/ui/SearchResultModel.cpp
+    src/ui/SearchResultModel.h
     src/ui/TextRenderer.cpp
     src/ui/TextRenderer.h
     src/ui/ThumbnailModel.cpp
@@ -52,6 +54,6 @@ target_include_directories(PdfApp PRIVATE
 set_target_properties(PdfApp PROPERTIES OUTPUT_NAME "PDF@home")
 
 target_link_libraries(PdfApp PRIVATE
-    Qt6::Widgets Qt6::Pdf Qt6::PdfWidgets
+    Qt6::Widgets
     unofficial::libmupdf::libmupdf
 )

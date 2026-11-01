@@ -32,7 +32,7 @@ ThumbnailPane::ThumbnailPane(QWidget *parent)
             });
 }
 
-void ThumbnailPane::setDocument(QPdfDocument *document)
+void ThumbnailPane::setDocument(PdfEditor *document)
 {
     m_model->setDocument(document);
 }

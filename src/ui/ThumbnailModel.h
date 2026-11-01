@@ -7,8 +7,8 @@
 #include <QThreadPool>
 
 class QMimeData;
-class QPdfDocument;
 class QTimer;
+class PdfEditor;
 
 class ThumbnailModel : public QAbstractListModel
 {
@@ -22,7 +22,7 @@ public:
 
     explicit ThumbnailModel(QObject *parent = nullptr);
 
-    void setDocument(QPdfDocument *document);
+    void setDocument(PdfEditor *document);
     void invalidatePageRenders(const QList<int> &changedPages = {});
 
     int rowCount(const QModelIndex &parent = {}) const override;
@@ -44,9 +44,11 @@ private:
     quint64 m_renderGeneration = 0;
     int m_inFlight = 0;
 
-    QPdfDocument *m_document = nullptr;
+    PdfEditor *m_document = nullptr;
+    int m_pageCount = 0;
     mutable QCache<int, QPixmap> m_cache;
     mutable QQueue<int> m_renderQueue;
     mutable QSet<int> m_queuedPages;
+    mutable bool m_renderQueueSaturated = false;
     QTimer *m_renderTimer = nullptr;
 };

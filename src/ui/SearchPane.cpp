@@ -1,47 +1,16 @@
 #include "SearchPane.h"
+#include "SearchResultModel.h"
 
 #include <QItemSelectionModel>
 #include <QLineEdit>
 #include <QListView>
-#include <QPdfDocument>
-#include <QPdfLink>
-#include <QPdfSearchModel>
-#include <QStyledItemDelegate>
+#include <QMessageBox>
 #include <QVBoxLayout>
-
-namespace {
-
-    class ResultDelegate : public QStyledItemDelegate
-    {
-    public:
-        ResultDelegate(const QPdfSearchModel *model, QObject *parent)
-            : QStyledItemDelegate(parent), m_model(model) {}
-
-    protected:
-        void initStyleOption(QStyleOptionViewItem *option,
-                            const QModelIndex &index) const override
-        {
-            QStyledItemDelegate::initStyleOption(option, index);
-
-            const int page = index.data(int(QPdfSearchModel::Role::Page)).toInt();
-            const QString before = index.data(int(QPdfSearchModel::Role::ContextBefore)).toString();
-            const QString after = index.data(int(QPdfSearchModel::Role::ContextAfter)).toString();
-
-            option->text = QString("p.%1   ...%2[%3]%4...")
-                            .arg(page + 1)
-                            .arg(before, m_model->searchString(), after);
-        }
-
-    private:
-        const QPdfSearchModel *m_model;
-    };
-
-}
 
 SearchPane::SearchPane(QWidget *parent)
     : QWidget(parent)
 {
-    m_model = new QPdfSearchModel(this);
+    m_model = new SearchResultModel(this);
 
     m_input = new QLineEdit(this);
     m_input->setPlaceholderText("Search in document...");
@@ -49,8 +18,11 @@ SearchPane::SearchPane(QWidget *parent)
 
     m_results = new QListView(this);
     m_results->setModel(m_model);
-    m_results->setItemDelegate(new ResultDelegate(m_model, m_results));
     m_results->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    connect(m_model, &SearchResultModel::searchFailed, this,
+            [this](const QString &error) {
+                QMessageBox::warning(this, "Search failed", error);
+            });
 
     auto *layout = new QVBoxLayout(this);
     layout->addWidget(m_input);
@@ -68,12 +40,13 @@ SearchPane::SearchPane(QWidget *parent)
             [this](const QModelIndex &current) {
                 if (!current.isValid())
                     return;
-                const QPdfLink link = m_model->resultAtIndex(current.row());
-                emit resultSelected(current.row(), link.page(), link.location());
+                const PdfEditor::SearchResult result =
+                    m_model->resultAtIndex(current.row());
+                emit resultSelected(current.row(), result.page, result.location);
             });
 }
 
-void SearchPane::setDocument(QPdfDocument *document)
+void SearchPane::setDocument(PdfEditor *document)
 {
     m_model->setDocument(document);
 }

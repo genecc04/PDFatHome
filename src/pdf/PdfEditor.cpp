@@ -17,6 +17,32 @@ extern "C" {
 
 namespace {
 
+QRectF quadBounds(const fz_quad &quad)
+{
+    const float left = qMin(qMin(quad.ul.x, quad.ur.x), qMin(quad.ll.x, quad.lr.x));
+    const float top = qMin(qMin(quad.ul.y, quad.ur.y), qMin(quad.ll.y, quad.lr.y));
+    const float right = qMax(qMax(quad.ul.x, quad.ur.x), qMax(quad.ll.x, quad.lr.x));
+    const float bottom = qMax(qMax(quad.ul.y, quad.ur.y), qMax(quad.ll.y, quad.lr.y));
+    return QRectF(left, top, right - left, bottom - top);
+}
+
+QPolygonF quadPolygon(const fz_quad &quad)
+{
+    return { QPointF(quad.ul.x, quad.ul.y), QPointF(quad.ur.x, quad.ur.y),
+             QPointF(quad.lr.x, quad.lr.y), QPointF(quad.ll.x, quad.ll.y) };
+}
+
+struct SearchQuadGroups {
+    std::vector<std::vector<fz_quad>> hits;
+};
+
+int collectSearchQuads(fz_context *, void *opaque, int count, fz_quad *quads)
+{
+    auto *groups = static_cast<SearchQuadGroups *>(opaque);
+    groups->hits.emplace_back(quads, quads + count);
+    return 0;
+}
+
 double pointSegmentDistanceSquared(const QPointF &point, const QPointF &start,
                                    const QPointF &end)
 {
@@ -279,11 +305,13 @@ void PdfEditor::close()
         pdf_drop_document(m_ctx, m_doc);
         m_doc = nullptr;
     }
+    m_path.clear();
 }
 
 bool PdfEditor::open(const QString &path, const QString &password)
 {
     close();
+    m_error.clear();
     if (!m_ctx) {
         m_error = "Could not start the PDF engine.";
         return false;
@@ -312,6 +340,7 @@ bool PdfEditor::open(const QString &path, const QString &password)
     }
 
     m_doc = doc;
+    m_path = path;
     return true;
 }
 
@@ -332,6 +361,280 @@ int PdfEditor::pageCount()
         return -1;
     }
     return count;
+}
+
+QSizeF PdfEditor::pagePointSize(int pageIndex)
+{
+    m_error.clear();
+    if (!m_doc) {
+        m_error = QStringLiteral("No document is open.");
+        return {};
+    }
+
+    pdf_page *page = nullptr;
+    fz_var(page);
+    float width = 0.0f;
+    float height = 0.0f;
+    fz_var(width);
+    fz_var(height);
+    fz_try(m_ctx)
+    {
+        page = pdf_load_page(m_ctx, m_doc, pageIndex);
+        const fz_rect bounds = fz_bound_page(m_ctx, &page->super);
+        width = bounds.x1 - bounds.x0;
+        height = bounds.y1 - bounds.y0;
+    }
+    fz_always(m_ctx)
+    {
+        if (page)
+            fz_drop_page(m_ctx, &page->super);
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return {};
+    }
+    return QSizeF(width, height);
+}
+
+QVector<QSizeF> PdfEditor::pageSizes()
+{
+    m_error.clear();
+    QVector<QSizeF> sizes;
+    const int count = pageCount();
+    if (count < 0)
+        return sizes;
+    sizes.reserve(count);
+    for (int page = 0; page < count; ++page) {
+        const QSizeF size = pagePointSize(page);
+        if (size.isEmpty())
+            return {};
+        sizes.append(size);
+    }
+    return sizes;
+}
+
+QVector<PdfEditor::Link> PdfEditor::linksOnPage(int pageIndex)
+{
+    QVector<Link> links;
+    m_error.clear();
+    if (!m_doc) {
+        m_error = QStringLiteral("No document is open.");
+        return links;
+    }
+
+    fz_page *page = nullptr;
+    fz_link *pageLinks = nullptr;
+    fz_var(page);
+    fz_var(pageLinks);
+    fz_try(m_ctx)
+    {
+        page = fz_load_page(m_ctx, &m_doc->super, pageIndex);
+        pageLinks = fz_load_links(m_ctx, page);
+        for (fz_link *item = pageLinks; item; item = item->next) {
+            Link link;
+            link.bounds = QRectF(item->rect.x0, item->rect.y0,
+                                 item->rect.x1 - item->rect.x0,
+                                 item->rect.y1 - item->rect.y0);
+            if (item->uri) {
+                if (fz_is_external_link(m_ctx, item->uri)) {
+                    link.url = QUrl(QString::fromUtf8(item->uri));
+                } else {
+                    float x = 0.0f;
+                    float y = 0.0f;
+                    const fz_location destination =
+                        fz_resolve_link(m_ctx, &m_doc->super, item->uri, &x, &y);
+                    link.page = fz_page_number_from_location(
+                        m_ctx, &m_doc->super, destination);
+                    link.location = QPointF(x, y);
+                }
+            }
+            links.append(link);
+        }
+    }
+    fz_always(m_ctx)
+    {
+        fz_drop_link(m_ctx, pageLinks);
+        if (page)
+            fz_drop_page(m_ctx, page);
+    }
+    fz_catch(m_ctx)
+    {
+        links.clear();
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+    }
+    return links;
+}
+
+QVector<PdfEditor::SearchResult> PdfEditor::search(const QString &text)
+{
+    QVector<SearchResult> results;
+    m_error.clear();
+    if (!m_doc) {
+        m_error = QStringLiteral("No document is open.");
+        return results;
+    }
+    const QString needleText = text.trimmed();
+    if (needleText.isEmpty())
+        return results;
+
+    const QByteArray needle = needleText.toUtf8();
+    const int count = pageCount();
+    if (count < 0)
+        return results;
+
+    for (int pageIndex = 0; pageIndex < count; ++pageIndex) {
+        fz_page *page = nullptr;
+        fz_stext_page *textPage = nullptr;
+        char *fullText = nullptr;
+        SearchQuadGroups groups;
+        fz_var(page);
+        fz_var(textPage);
+        fz_var(fullText);
+        fz_try(m_ctx)
+        {
+            page = fz_load_page(m_ctx, &m_doc->super, pageIndex);
+            textPage = fz_new_stext_page_from_page(m_ctx, page, nullptr);
+            fz_search_stext_page_cb(m_ctx, textPage, needle.constData(),
+                                    collectSearchQuads, &groups);
+            const fz_rect bounds = fz_bound_page(m_ctx, page);
+            fullText = fz_copy_selection(
+                m_ctx, textPage, fz_make_point(bounds.x0, bounds.y0),
+                fz_make_point(bounds.x1, bounds.y1), 0);
+
+            const QString pageText = QString::fromUtf8(fullText ? fullText : "");
+            int searchOffset = 0;
+            for (const std::vector<fz_quad> &hit : groups.hits) {
+                if (hit.empty())
+                    continue;
+                SearchResult result;
+                result.page = pageIndex;
+                for (const fz_quad &quad : hit) {
+                    const QRectF rect = quadBounds(quad);
+                    result.rectangles.append(rect);
+                    if (result.rectangles.size() == 1)
+                        result.location = rect.topLeft();
+                }
+                const int matchIndex = pageText.indexOf(
+                    needleText, searchOffset, Qt::CaseInsensitive);
+                if (matchIndex >= 0) {
+                    result.contextBefore = pageText.mid(qMax(0, matchIndex - 48),
+                                                        qMin(48, matchIndex));
+                    result.contextAfter = pageText.mid(
+                        matchIndex + needleText.size(), 48);
+                    searchOffset = matchIndex + needleText.size();
+                }
+                results.append(std::move(result));
+            }
+        }
+        fz_always(m_ctx)
+        {
+            fz_free(m_ctx, fullText);
+            fz_drop_stext_page(m_ctx, textPage);
+            fz_drop_page(m_ctx, page);
+        }
+        fz_catch(m_ctx)
+        {
+            results.clear();
+            m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+            return results;
+        }
+    }
+    return results;
+}
+
+QVector<PdfEditor::Bookmark> PdfEditor::bookmarks()
+{
+    QVector<Bookmark> result;
+    m_error.clear();
+    if (!m_doc) {
+        m_error = QStringLiteral("No document is open.");
+        return result;
+    }
+
+    fz_outline *outline = nullptr;
+    fz_var(outline);
+    fz_try(m_ctx)
+    {
+        outline = fz_load_outline(m_ctx, &m_doc->super);
+        const auto appendItems = [this](auto &&self, fz_outline *item,
+                                         QVector<Bookmark> &items) -> void {
+            for (; item; item = item->next) {
+                Bookmark bookmark;
+                bookmark.title = QString::fromUtf8(item->title ? item->title : "");
+                bookmark.page = fz_page_number_from_location(
+                    m_ctx, &m_doc->super, item->page);
+                bookmark.location = QPointF(item->x, item->y);
+                self(self, item->down, bookmark.children);
+                items.append(std::move(bookmark));
+            }
+        };
+        appendItems(appendItems, outline, result);
+    }
+    fz_always(m_ctx)
+    {
+        fz_drop_outline(m_ctx, outline);
+    }
+    fz_catch(m_ctx)
+    {
+        result.clear();
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+    }
+    return result;
+}
+
+PdfEditor::TextSelection PdfEditor::selectText(int pageIndex, const QPointF &start,
+                                               const QPointF &end, bool snapToWords)
+{
+    TextSelection selection;
+    m_error.clear();
+    if (!m_doc) {
+        m_error = QStringLiteral("No document is open.");
+        return selection;
+    }
+
+    fz_page *page = nullptr;
+    fz_stext_page *textPage = nullptr;
+    char *text = nullptr;
+    fz_var(page);
+    fz_var(textPage);
+    fz_var(text);
+    fz_try(m_ctx)
+    {
+        page = fz_load_page(m_ctx, &m_doc->super, pageIndex);
+        textPage = fz_new_stext_page_from_page(m_ctx, page, nullptr);
+        fz_point a = fz_make_point(float(start.x()), float(start.y()));
+        fz_point b = fz_make_point(float(end.x()), float(end.y()));
+        if (snapToWords)
+            fz_snap_selection(m_ctx, textPage, &a, &b, FZ_SELECT_WORDS);
+        text = fz_copy_selection(m_ctx, textPage, a, b, 0);
+
+        constexpr int kMaxSelectionQuads = 65536;
+        std::vector<fz_quad> quads(kMaxSelectionQuads);
+        const int count = fz_highlight_selection(
+            m_ctx, textPage, a, b, quads.data(), int(quads.size()));
+        selection.text = QString::fromUtf8(text ? text : "");
+        selection.bounds.reserve(qMax(0, count));
+        for (int i = 0; i < count; ++i)
+            selection.bounds.append(quadPolygon(quads[size_t(i)]));
+    }
+    fz_always(m_ctx)
+    {
+        fz_free(m_ctx, text);
+        fz_drop_stext_page(m_ctx, textPage);
+        fz_drop_page(m_ctx, page);
+    }
+    fz_catch(m_ctx)
+    {
+        selection = {};
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+    }
+    return selection;
+}
+
+PdfEditor::TextSelection PdfEditor::selectWord(int pageIndex, const QPointF &point)
+{
+    return selectText(pageIndex, point, point, true);
 }
 
 bool PdfEditor::saveAs(const QString &path, bool removeUnused,

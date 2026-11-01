@@ -4,8 +4,8 @@
 
 class QLineEdit;
 class QListView;
-class QPdfDocument;
-class QPdfSearchModel;
+class PdfEditor;
+class SearchResultModel;
 
 class SearchPane : public QWidget
 {
@@ -13,8 +13,8 @@ class SearchPane : public QWidget
 public:
     explicit SearchPane(QWidget *parent = nullptr);
 
-    void setDocument(QPdfDocument *document);
-    QPdfSearchModel *searchModel() const { return m_model; }
+    void setDocument(PdfEditor *document);
+    SearchResultModel *searchModel() const { return m_model; }
     void focusSearchBox();
 
 signals:
@@ -23,5 +23,5 @@ signals:
 private:
     QLineEdit *m_input = nullptr;
     QListView *m_results = nullptr;
-    QPdfSearchModel *m_model = nullptr;
+    SearchResultModel *m_model = nullptr;
 };

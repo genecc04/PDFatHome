@@ -2,8 +2,8 @@
 #include <QPointF>
 #include <QTreeView>
 
-class QPdfBookmarkModel;
-class QPdfDocument;
+class QStandardItemModel;
+class PdfEditor;
 
 class BookmarkPane : public QTreeView
 {
@@ -11,11 +11,11 @@ class BookmarkPane : public QTreeView
 public:
     explicit BookmarkPane(QWidget *parent = nullptr);
 
-    void setDocument(QPdfDocument *document);
+    void setDocument(PdfEditor *document);
 
 signals:
     void bookmarkSelected(int page, QPointF location);
 
 private:
-    QPdfBookmarkModel *m_model = nullptr;
+    QStandardItemModel *m_model = nullptr;
 };

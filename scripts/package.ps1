@@ -65,7 +65,7 @@ try {
     }
 
     foreach ($requiredDll in @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll",
-                               "Qt6Pdf.dll", "Qt6Network.dll")) {
+                               "Qt6Network.dll")) {
         if (-not (Test-Path (Join-Path $stagePath $requiredDll) -PathType Leaf)) {
             throw "The deployed Qt runtime is incomplete; '$requiredDll' was not found."
         }
@@ -83,8 +83,7 @@ compatible modified versions or LGPL-permitted reverse engineering for debugging
 changes to Qt libraries.
 
 Before distributing this binary, review THIRD_PARTY_NOTICES.md. This packaging
-script does not include the complete Qt PDF third-party notice set and does not
-provide the corresponding source/build materials required for the statically
+script does not provide the source/build materials required for the statically
 linked MuPDF build.
 "@ | Set-Content -Path (Join-Path $stagePath "DISTRIBUTION-NOTICE.txt") -Encoding UTF8
 

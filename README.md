@@ -1,6 +1,8 @@
 # PDF@home
 
 A desktop PDF reader and editor for Windows, built with C++, Qt 6 and MuPDF.
+MuPDF handles PDF loading, rendering, search and editing; Qt provides the user
+interface.
 Everything happens on your computer: your files are never uploaded. The app only opens
 web links embedded in a PDF in your default browser after you confirm.
 
@@ -85,8 +87,8 @@ which most computers already have.
 
 ## Building from source
 
-Requirements: CMake 3.21+, a C++17 compiler (developed with MSVC), Qt 6 with the
-Widgets, Pdf and PdfWidgets modules, and [vcpkg](https://github.com/microsoft/vcpkg).
+Requirements: CMake 3.21+, a C++17 compiler (developed with MSVC), Qt 6 Widgets,
+and [vcpkg](https://github.com/microsoft/vcpkg).
 The development build was tested with Qt 6.8.0 for MSVC 2022 and MuPDF 1.26.10
 from vcpkg. QMake reports version 3.1 with that Qt installation; this project uses
 CMake to configure and build.
@@ -121,9 +123,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1
 
 This builds in Release mode and creates `dist/PDF@home-windows.zip` with the program,
 the dynamically linked Qt runtime, and the repository's license materials. If needed,
-pass `-QtRoot` and `-BuildDir` to match your machine. The script does not bundle the
-complete Qt PDF third-party notice set or create the corresponding source materials
-required for distributing the statically linked MuPDF build. Review
+pass `-QtRoot` and `-BuildDir` to match your machine. The script does not create the
+source materials required for distributing the statically linked MuPDF build. Review
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and complete those release-specific
 steps before distributing the archive.
 
@@ -143,5 +144,4 @@ It uses [Qt](https://www.qt.io) (LGPL-3.0) and [MuPDF](https://mupdf.com)
 (AGPL-3.0, Artifex Software, Inc.), among other libraries. The known dependency
 inventory and available license texts are documented in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the [licenses](licenses/)
-folder. The Qt PDF/PDFium section identifies upstream notices that still need
-exact-package verification before a binary release.
+folder.

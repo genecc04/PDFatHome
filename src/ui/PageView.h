@@ -18,14 +18,13 @@
 #include <QThreadPool>
 #include <functional>
 
-class QPdfDocument;
-class QPdfLink;
-class QPdfLinkModel;
-class QPdfSearchModel;
+#include "PdfEditor.h"
+
 class QComboBox;
 class QLineEdit;
 class QPlainTextEdit;
 class QPushButton;
+class SearchResultModel;
 class QTimer;
 
 class PageView : public QAbstractScrollArea
@@ -71,15 +70,14 @@ public:
     explicit PageView(QWidget *parent = nullptr);
     ~PageView() override;
 
-    void setDocument(QPdfDocument *document);
+    void setDocument(PdfEditor *document);
     void setLoading(bool loading);
     void setPageSizeHint(const QVector<QSizeF> &sizes);
     QVector<QSizeF> pageSizes() const { return m_pageSizes; }
-    void rescanPageSizes();
     void stepLoading();
     void setRenderSource(const QString &path, const QString &password = QString());
     void invalidatePageRenders(const QList<int> &changedPages = {});
-    void setSearchModel(QPdfSearchModel *model);
+    void setSearchModel(SearchResultModel *model);
     void setCurrentSearchResultIndex(int index);
 
     int currentPage() const { return m_currentPage; }
@@ -188,7 +186,7 @@ private:
     };
 
     struct PageLinkCache {
-        QList<QPdfLink> links;
+        QVector<PdfEditor::Link> links;
         QVector<LinkHitRegion> regions;
         QVector<QVector<int>> cells;
         bool loaded = false;
@@ -203,9 +201,9 @@ private:
     void drawLoadingIndicator(QPainter &painter);
     void updateCurrentPage();
     int pageAtViewportPoint(const QPoint &point) const;
-    const QList<QPdfLink> &linksOnPage(int page);
+    const QVector<PdfEditor::Link> &linksOnPage(int page);
     void loadPageLinks(int page);
-    QPdfLink linkAtViewportPoint(const QPoint &point);
+    PdfEditor::Link linkAtViewportPoint(const QPoint &point);
     void setHoveredLink(const QUrl &url);
     int nearestPage(const QPoint &viewportPos) const;
     QRect pageRectInViewport(int page) const;
@@ -214,7 +212,7 @@ private:
                       bool includeAnnotations = true);
     bool updateErasePreview(const QPointF &start, const QPointF &end);
     void drawSearchResults(QPainter &painter, int page, const QRect &pageRect,
-                           const QPdfLink &current);
+                           const PdfEditor::SearchResult &current);
     void drawFormFieldOverlays(QPainter &painter, int page, const QRect &pageRect);
     void drawStroke(QPainter &painter, const Stroke &stroke, const QRect &pageRect);
 
@@ -249,14 +247,14 @@ private:
     QRectF selectedTextAnnotationViewportBounds() const;
     int textAnnotationResizeHandleAt(const QPoint &pos) const;
 
-    QPdfDocument *m_document = nullptr;
+    PdfEditor *m_document = nullptr;
     QString m_renderSourcePath;
     QString m_renderPassword;
     quint64 m_renderGeneration = 0;
+    bool m_renderRequestsSaturated = false;
     QThreadPool m_renderPool;
-    QPdfLinkModel *m_linkModel = nullptr;
     QVector<PageLinkCache> m_pageLinkCaches;
-    QPdfSearchModel *m_search = nullptr;
+    SearchResultModel *m_search = nullptr;
     QPushButton *m_emptyStateOpenButton = nullptr;
     QTimer *m_zoomTimer = nullptr;
     QPixmap m_loadingSprite;

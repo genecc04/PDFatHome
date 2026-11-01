@@ -1,17 +1,18 @@
 #include "ThumbnailModel.h"
 #include "MuPdfRenderCache.h"
+#include "PdfEditor.h"
 
 #include <QDebug>
 #include <QRunnable>
 #include <QThread>
 #include <QThreadPool>
-#include <QPdfDocument>
 #include <QPainter>
 #include <QMimeData>
 #include <QTimer>
 
 namespace {
 constexpr int kMaxInFlight = 2;
+constexpr int kMaxQueuedRenders = 32;
 }
 
 ThumbnailModel::ThumbnailModel(QObject *parent)
@@ -34,21 +35,14 @@ ThumbnailModel::~ThumbnailModel()
     m_renderPool.waitForDone();
 }
 
-void ThumbnailModel::setDocument(QPdfDocument *document)
+void ThumbnailModel::setDocument(PdfEditor *document)
 {
+    beginResetModel();
     m_document = document;
-    if (!m_document) {
-        m_cache.clear();
-        invalidateRenders();
-        return;
-    }
-
-    connect(m_document, &QPdfDocument::statusChanged, this, [this]() {
-        beginResetModel();
-        m_cache.clear();
-        invalidateRenders();
-        endResetModel();
-    });
+    m_pageCount = m_document ? qMax(0, m_document->pageCount()) : 0;
+    m_cache.clear();
+    invalidateRenders();
+    endResetModel();
 }
 
 void ThumbnailModel::setRenderSource(const QString &path, const QString &password)
@@ -90,6 +84,7 @@ void ThumbnailModel::invalidateRenders()
     m_renderTimer->stop();
     m_renderQueue.clear();
     m_queuedPages.clear();
+    m_renderQueueSaturated = false;
 }
 
 void ThumbnailModel::dispatchRenders()
@@ -161,6 +156,11 @@ void ThumbnailModel::dispatchRenders()
                                              { Qt::DecorationRole });
                         }
                         dispatchRenders();
+                        if (m_renderQueueSaturated && rowCount() > 0) {
+                            m_renderQueueSaturated = false;
+                            emit dataChanged(index(0), index(rowCount() - 1),
+                                             { Qt::DecorationRole });
+                        }
                     },
                     Qt::QueuedConnection);
             }));
@@ -169,10 +169,9 @@ void ThumbnailModel::dispatchRenders()
 
 int ThumbnailModel::rowCount(const QModelIndex &parent) const
 {
-    if (parent.isValid() || !m_document
-        || m_document->status() != QPdfDocument::Status::Ready)
+    if (parent.isValid() || !m_document)
         return 0;
-    return m_document->pageCount();
+    return m_pageCount;
 }
 
 QVariant ThumbnailModel::data(const QModelIndex &index, int role) const
@@ -190,10 +189,14 @@ QVariant ThumbnailModel::data(const QModelIndex &index, int role) const
             return *cached;
 
         if (!m_queuedPages.contains(page)) {
-            m_queuedPages.insert(page);
-            m_renderQueue.enqueue(page);
-            if (!m_renderTimer->isActive())
-                m_renderTimer->start();
+            if (m_renderQueue.size() < kMaxQueuedRenders) {
+                m_queuedPages.insert(page);
+                m_renderQueue.enqueue(page);
+                if (!m_renderTimer->isActive())
+                    m_renderTimer->start();
+            } else {
+                m_renderQueueSaturated = true;
+            }
         }
 
         static const QPixmap placeholder = []() {
