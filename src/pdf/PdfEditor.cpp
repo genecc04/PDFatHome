@@ -1366,7 +1366,10 @@ bool PdfEditor::inkStrokesOnPage(int pageIndex, QVector<InkStroke> *strokes)
     }
 
     QVector<InkStroke> result;
+    InkStroke stroke;
     pdf_page *page = nullptr;
+    fz_var(result);
+    fz_var(stroke);
     fz_var(page);
     fz_try(m_ctx)
     {
@@ -1383,7 +1386,7 @@ bool PdfEditor::inkStrokesOnPage(int pageIndex, QVector<InkStroke> *strokes)
             const double width = qMax(0.0, double(pdf_annot_border_width(m_ctx, annot)));
             const int strokeCount = pdf_annot_ink_list_count(m_ctx, annot);
             for (int strokeIndex = 0; strokeIndex < strokeCount; ++strokeIndex) {
-                InkStroke stroke;
+                stroke = InkStroke();
                 stroke.widthPoints = width;
                 const int vertexCount = pdf_annot_ink_list_stroke_count(
                     m_ctx, annot, strokeIndex);
@@ -1607,9 +1610,11 @@ bool PdfEditor::formFieldsOnPage(int pageIndex, QVector<FormField> *fields)
     pdf_page *page = nullptr;
     char *fieldName = nullptr;
     int succeeded = 1;
+    FormField field;
     fz_var(page);
     fz_var(fieldName);
     fz_var(succeeded);
+    fz_var(field);
 
     fz_try(m_ctx)
     {
@@ -1617,7 +1622,7 @@ bool PdfEditor::formFieldsOnPage(int pageIndex, QVector<FormField> *fields)
         int widgetIndex = 0;
         for (pdf_annot *widget = pdf_first_widget(m_ctx, page); widget;
              widget = pdf_next_widget(m_ctx, widget), ++widgetIndex) {
-            FormField field;
+            field = FormField();
             const enum pdf_widget_type widgetType = pdf_widget_type(m_ctx, widget);
             switch (widgetType) {
             case PDF_WIDGET_TYPE_TEXT:        field.type = FormFieldType::Text; break;
