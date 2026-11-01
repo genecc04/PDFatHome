@@ -429,12 +429,14 @@ QVector<PdfEditor::Link> PdfEditor::linksOnPage(int pageIndex)
     fz_link *pageLinks = nullptr;
     fz_var(page);
     fz_var(pageLinks);
+    fz_var(links);
     fz_try(m_ctx)
     {
         page = fz_load_page(m_ctx, &m_doc->super, pageIndex);
         pageLinks = fz_load_links(m_ctx, page);
         for (fz_link *item = pageLinks; item; item = item->next) {
-            Link link;
+            links.append(Link());
+            Link &link = links.last();
             link.bounds = QRectF(item->rect.x0, item->rect.y0,
                                  item->rect.x1 - item->rect.x0,
                                  item->rect.y1 - item->rect.y0);
@@ -451,7 +453,6 @@ QVector<PdfEditor::Link> PdfEditor::linksOnPage(int pageIndex)
                     link.location = QPointF(x, y);
                 }
             }
-            links.append(link);
         }
     }
     fz_always(m_ctx)
@@ -485,48 +486,30 @@ QVector<PdfEditor::SearchResult> PdfEditor::search(const QString &text)
     if (count < 0)
         return results;
 
+    fz_var(results);
     for (int pageIndex = 0; pageIndex < count; ++pageIndex) {
         fz_page *page = nullptr;
         fz_stext_page *textPage = nullptr;
         char *fullText = nullptr;
+        QString pageText;
         SearchQuadGroups groups;
         fz_var(page);
         fz_var(textPage);
         fz_var(fullText);
+        fz_var(pageText);
+        fz_var(groups);
         fz_try(m_ctx)
         {
             page = fz_load_page(m_ctx, &m_doc->super, pageIndex);
             textPage = fz_new_stext_page_from_page(m_ctx, page, nullptr);
             fz_search_stext_page_cb(m_ctx, textPage, needle.constData(),
                                     collectSearchQuads, &groups);
-            const fz_rect bounds = fz_bound_page(m_ctx, page);
-            fullText = fz_copy_selection(
-                m_ctx, textPage, fz_make_point(bounds.x0, bounds.y0),
-                fz_make_point(bounds.x1, bounds.y1), 0);
-
-            const QString pageText = QString::fromUtf8(fullText ? fullText : "");
-            int searchOffset = 0;
-            for (const std::vector<fz_quad> &hit : groups.hits) {
-                if (hit.empty())
-                    continue;
-                SearchResult result;
-                result.page = pageIndex;
-                for (const fz_quad &quad : hit) {
-                    const QRectF rect = quadBounds(quad);
-                    result.rectangles.append(rect);
-                    if (result.rectangles.size() == 1)
-                        result.location = rect.topLeft();
-                }
-                const int matchIndex = pageText.indexOf(
-                    needleText, searchOffset, Qt::CaseInsensitive);
-                if (matchIndex >= 0) {
-                    result.contextBefore = pageText.mid(qMax(0, matchIndex - 48),
-                                                        qMin(48, matchIndex));
-                    result.contextAfter = pageText.mid(
-                        matchIndex + needleText.size(), 48);
-                    searchOffset = matchIndex + needleText.size();
-                }
-                results.append(std::move(result));
+            if (!groups.hits.empty()) {
+                const fz_rect bounds = fz_bound_page(m_ctx, page);
+                fullText = fz_copy_selection(
+                    m_ctx, textPage, fz_make_point(bounds.x0, bounds.y0),
+                    fz_make_point(bounds.x1, bounds.y1), 0);
+                pageText = QString::fromUtf8(fullText ? fullText : "");
             }
         }
         fz_always(m_ctx)
@@ -540,6 +523,30 @@ QVector<PdfEditor::SearchResult> PdfEditor::search(const QString &text)
             results.clear();
             m_error = QString::fromUtf8(fz_caught_message(m_ctx));
             return results;
+        }
+
+        int searchOffset = 0;
+        for (const std::vector<fz_quad> &hit : groups.hits) {
+            if (hit.empty())
+                continue;
+            SearchResult result;
+            result.page = pageIndex;
+            for (const fz_quad &quad : hit) {
+                const QRectF rect = quadBounds(quad);
+                result.rectangles.append(rect);
+                if (result.rectangles.size() == 1)
+                    result.location = rect.topLeft();
+            }
+            const int matchIndex = pageText.indexOf(
+                needleText, searchOffset, Qt::CaseInsensitive);
+            if (matchIndex >= 0) {
+                result.contextBefore = pageText.mid(qMax(0, matchIndex - 48),
+                                                    qMin(48, matchIndex));
+                result.contextAfter = pageText.mid(
+                    matchIndex + needleText.size(), 48);
+                searchOffset = matchIndex + needleText.size();
+            }
+            results.append(std::move(result));
         }
     }
     return results;
@@ -556,19 +563,20 @@ QVector<PdfEditor::Bookmark> PdfEditor::bookmarks()
 
     fz_outline *outline = nullptr;
     fz_var(outline);
+    fz_var(result);
     fz_try(m_ctx)
     {
         outline = fz_load_outline(m_ctx, &m_doc->super);
         const auto appendItems = [this](auto &&self, fz_outline *item,
                                          QVector<Bookmark> &items) -> void {
             for (; item; item = item->next) {
-                Bookmark bookmark;
+                items.append(Bookmark());
+                Bookmark &bookmark = items.last();
                 bookmark.title = QString::fromUtf8(item->title ? item->title : "");
                 bookmark.page = fz_page_number_from_location(
                     m_ctx, &m_doc->super, item->page);
                 bookmark.location = QPointF(item->x, item->y);
                 self(self, item->down, bookmark.children);
-                items.append(std::move(bookmark));
             }
         };
         appendItems(appendItems, outline, result);

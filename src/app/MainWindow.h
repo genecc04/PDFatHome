@@ -127,6 +127,7 @@ private:
     void endEditOperation();
     bool reopenEditor(const QString &path);
     void removeSnapshots(const QStringList &paths);
+    void removeDeferredSnapshots();
     bool removeTempFile(const QString &path, bool reportFailure = false);
     bool isTempFile(const QString &path) const;
 
@@ -179,7 +180,9 @@ private:
     QString m_currentPath;
     QString m_displayName;
     QString m_password;
+    QStringList m_deferredSnapshotRemovals;
     int m_editCount = 0;
     QSet<int> m_formFieldPagesLoaded;
+    QSet<int> m_formFieldPagesFailed;
     QHash<QString, QVector<QSizeF>> m_pageSizeCache;
 };

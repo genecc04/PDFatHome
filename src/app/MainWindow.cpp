@@ -80,6 +80,7 @@ MainWindow::~MainWindow()
 
     m_document = nullptr;
     m_editor.reset();
+    removeDeferredSnapshots();
 
     if (!m_tempDir.isValid())
         return;
@@ -212,6 +213,7 @@ void MainWindow::endEditOperation()
 bool MainWindow::reopenEditor(const QString &path)
 {
     m_formFieldPagesLoaded.clear();
+    m_formFieldPagesFailed.clear();
     if (m_view)
         m_view->clearFormFieldOverlays();
 
@@ -227,9 +229,9 @@ bool MainWindow::reopenEditor(const QString &path)
             m_bookmarks->setDocument(nullptr);
         m_document = nullptr;
         m_editor.reset();
+        removeDeferredSnapshots();
         return false;
     }
-
     m_editor.swap(editor);
     m_document = m_editor.get();
     if (m_view)
@@ -240,6 +242,8 @@ bool MainWindow::reopenEditor(const QString &path)
         m_search->setDocument(m_document);
     if (m_bookmarks)
         m_bookmarks->setDocument(m_document);
+    editor.reset();
+    removeDeferredSnapshots();
     return true;
 }
 
@@ -247,8 +251,36 @@ void MainWindow::removeSnapshots(const QStringList &paths)
 {
     for (const QString &path : paths) {
         m_pageSizeCache.remove(path);
-        if (isTempFile(path))
-            removeTempFile(path);
+        if (!isTempFile(path))
+            continue;
+
+        const bool editorHasOpenSnapshot =
+            m_editor && QDir::cleanPath(m_editor->filePath()).compare(
+                            QDir::cleanPath(path), Qt::CaseInsensitive) == 0;
+        if ((editorHasOpenSnapshot || !removeTempFile(path))
+            && !m_deferredSnapshotRemovals.contains(path)) {
+            m_deferredSnapshotRemovals.append(path);
+        }
+    }
+    removeDeferredSnapshots();
+}
+
+void MainWindow::removeDeferredSnapshots()
+{
+    for (auto it = m_deferredSnapshotRemovals.begin();
+         it != m_deferredSnapshotRemovals.end();) {
+        const bool editorHasOpenSnapshot =
+            m_editor && QDir::cleanPath(m_editor->filePath()).compare(
+                            QDir::cleanPath(*it), Qt::CaseInsensitive) == 0;
+        if (editorHasOpenSnapshot) {
+            ++it;
+            continue;
+        }
+
+        if (removeTempFile(*it, true))
+            it = m_deferredSnapshotRemovals.erase(it);
+        else
+            ++it;
     }
 }
 
@@ -402,11 +434,13 @@ bool MainWindow::refreshFormFieldOverlays(int firstPage, int lastPage)
 
     for (int pageIndex = keepFirstPage; pageIndex <= keepLastPage; ++pageIndex) {
         pagesToKeep.insert(pageIndex);
-        if (m_formFieldPagesLoaded.contains(pageIndex))
+        if (m_formFieldPagesLoaded.contains(pageIndex)
+            || m_formFieldPagesFailed.contains(pageIndex))
             continue;
 
         QVector<PdfEditor::FormField> editorFields;
         if (!m_editor->formFieldsOnPage(pageIndex, &editorFields)) {
+            m_formFieldPagesFailed.insert(pageIndex);
             QMessageBox::warning(this, "Form fields",
                                  "Could not load form fields for display: "
                                      + m_editor->lastError());

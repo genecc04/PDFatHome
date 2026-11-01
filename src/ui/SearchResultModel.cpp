@@ -17,9 +17,12 @@ void SearchResultModel::setSearchString(const QString &text)
     m_searchString = text.trimmed();
     QString error;
     m_results.clear();
+    m_resultsByPage.clear();
     if (m_document && !m_searchString.isEmpty()) {
         m_results = m_document->search(m_searchString);
         error = m_document->lastError();
+        for (const PdfEditor::SearchResult &result : m_results)
+            m_resultsByPage[result.page].append(result);
     }
     endResetModel();
     if (!error.isEmpty())
@@ -32,14 +35,11 @@ PdfEditor::SearchResult SearchResultModel::resultAtIndex(int index) const
                ? m_results.at(index) : PdfEditor::SearchResult();
 }
 
-QVector<PdfEditor::SearchResult> SearchResultModel::resultsOnPage(int page) const
+const QVector<PdfEditor::SearchResult> &SearchResultModel::resultsOnPage(int page) const
 {
-    QVector<PdfEditor::SearchResult> results;
-    for (const PdfEditor::SearchResult &result : m_results) {
-        if (result.page == page)
-            results.append(result);
-    }
-    return results;
+    static const QVector<PdfEditor::SearchResult> emptyResults;
+    const auto results = m_resultsByPage.constFind(page);
+    return results == m_resultsByPage.cend() ? emptyResults : results.value();
 }
 
 int SearchResultModel::rowCount(const QModelIndex &parent) const

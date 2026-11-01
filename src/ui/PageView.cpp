@@ -215,8 +215,8 @@ PageView::PageView(QWidget *parent)
 
 PageView::~PageView()
 {
-    invalidatePendingPageRenders();   // bump generation and drop renders that haven't started
-    m_renderPool.waitForDone();       // wait only for the render already running, then end the thread
+    invalidatePendingPageRenders();
+    m_renderPool.waitForDone();
 }
 
 // document and zoom
@@ -709,6 +709,15 @@ void PageView::trimPageImageCaches()
     const int keepFirst = qMax(0, first - kPageCachePrefetchRadius);
     const int keepLast = qMin(m_pageRects.size() - 1, last + kPageCachePrefetchRadius);
     int evicted = 0;
+    int evictedLinkPages = 0;
+    for (int page = 0; page < m_pageLinkCaches.size(); ++page) {
+        if ((page < keepFirst || page > keepLast)
+            && m_pageLinkCaches.at(page).loaded) {
+            m_pageLinkCaches[page] = PageLinkCache();
+            ++evictedLinkPages;
+        }
+    }
+
     const auto evictDistantPages = [&](QCache<quint64, QPixmap> &cache,
                                        QSet<quint64> &staleKeys) {
         const QList<quint64> keys = cache.keys();
@@ -768,6 +777,9 @@ void PageView::trimPageImageCaches()
             << qint64(m_cache.totalCost() + m_baseCache.totalCost()
                       + m_tileCache.totalCost()) * 1024;
     }
+    if (evictedLinkPages > 0)
+        qCDebug(lcPageRasterCache) << "Evicted link data for distant pages:"
+                                   << evictedLinkPages;
 }
 
 void PageView::discardQueuedPageRenders()
@@ -884,11 +896,12 @@ int PageView::pageAtViewportPoint(const QPoint &point) const
 {
     const QPoint doc = point + QPoint(horizontalScrollBar()->value(),
                                       verticalScrollBar()->value());
-    for (int i = 0; i < m_pageRects.size(); ++i) {
-        if (m_pageRects.at(i).contains(doc))
-            return i;
-    }
-    return -1;
+    const auto page = std::lower_bound(
+        m_pageRects.cbegin(), m_pageRects.cend(), doc.y(),
+        [](const QRect &rect, int y) { return rect.bottom() < y; });
+    if (page == m_pageRects.cend() || !page->contains(doc))
+        return -1;
+    return int(page - m_pageRects.cbegin());
 }
 
 const QVector<PdfEditor::Link> &PageView::linksOnPage(int page)
@@ -986,11 +999,12 @@ void PageView::setHoveredLink(const QUrl &url)
 int PageView::nearestPage(const QPoint &viewportPos) const
 {
     const int y = viewportPos.y() + verticalScrollBar()->value();
-    for (int i = 0; i < m_pageRects.size(); ++i) {
-        if (y <= m_pageRects.at(i).bottom())
-            return i;
-    }
-    return qMax(0, int(m_pageRects.size()) - 1);
+    const auto page = std::lower_bound(
+        m_pageRects.cbegin(), m_pageRects.cend(), y,
+        [](const QRect &rect, int position) { return rect.bottom() < position; });
+    if (page == m_pageRects.cend())
+        return qMax(0, int(m_pageRects.size()) - 1);
+    return int(page - m_pageRects.cbegin());
 }
 
 QRect PageView::pageRectInViewport(int page) const
@@ -1030,7 +1044,7 @@ void PageView::drawSearchResults(QPainter &painter, int page, const QRect &pageR
 {
     if (!m_search)
         return;
-    const QVector<PdfEditor::SearchResult> results = m_search->resultsOnPage(page);
+    const QVector<PdfEditor::SearchResult> &results = m_search->resultsOnPage(page);
     for (const PdfEditor::SearchResult &result : results) {
         const bool isCurrent = current.page == page && current.location == result.location;
         for (const QRectF &r : result.rectangles) {

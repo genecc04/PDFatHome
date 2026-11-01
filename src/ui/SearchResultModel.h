@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QAbstractListModel>
+#include <QHash>
 #include <QVector>
 
 #include "PdfEditor.h"
@@ -15,7 +16,7 @@ public:
     void setSearchString(const QString &text);
     QString searchString() const { return m_searchString; }
     PdfEditor::SearchResult resultAtIndex(int index) const;
-    QVector<PdfEditor::SearchResult> resultsOnPage(int page) const;
+    const QVector<PdfEditor::SearchResult> &resultsOnPage(int page) const;
 
     int rowCount(const QModelIndex &parent = {}) const override;
     QVariant data(const QModelIndex &index, int role) const override;
@@ -27,4 +28,5 @@ private:
     PdfEditor *m_document = nullptr;
     QString m_searchString;
     QVector<PdfEditor::SearchResult> m_results;
+    QHash<int, QVector<PdfEditor::SearchResult>> m_resultsByPage;
 };

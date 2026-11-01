@@ -263,6 +263,7 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
         m_editor.swap(previousEditor);
         m_document = m_editor.get();
         m_formFieldPagesLoaded.clear();
+        m_formFieldPagesFailed.clear();
         m_view->clearFormFieldOverlays();
         m_view->setDocument(m_document);
         m_thumbnails->setDocument(m_document);
@@ -275,6 +276,8 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
                 "The new PDF could not be opened, and the previous PDF could not be "
                 "restored. Try reopening the previous file.");
         }
+        previousEditor.reset();
+        removeDeferredSnapshots();
         if (result->workingCopyCreated)
             removeTempFile(workingPath);
         endLoading();
@@ -284,6 +287,8 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
 
     m_view->stepLoading();
 
+    previousEditor.reset();
+    removeDeferredSnapshots();
     removeSnapshots(m_history.states());
     m_history.clear();
     m_currentPath = path;
@@ -365,6 +370,7 @@ bool MainWindow::showFile(const QString &path, int page, bool reportErrors,
         m_document = m_editor.get();
     }
     m_formFieldPagesLoaded.clear();
+    m_formFieldPagesFailed.clear();
     m_view->clearFormFieldOverlays();
     m_view->setPageSizeHint(pageSizes);
     m_view->setDocument(m_document, preserveRasterPreviews);
@@ -372,6 +378,8 @@ bool MainWindow::showFile(const QString &path, int page, bool reportErrors,
     m_thumbnails->setDocument(m_document);
     m_search->setDocument(m_document);
     m_bookmarks->setDocument(m_document);
+    replacement.reset();
+    removeDeferredSnapshots();
     m_view->setRenderSource(path, m_password);
     m_thumbnails->setRenderSource(path, m_password);
 
@@ -558,6 +566,7 @@ bool MainWindow::save()
     m_bookmarks->setDocument(nullptr);
     m_document = nullptr;
     m_editor.reset();
+    removeDeferredSnapshots();
 
     QString replacementMessage;
     if (!replaceFile(tmp, target, &replacementMessage)) {
@@ -667,6 +676,7 @@ bool MainWindow::refreshAfterPageEdit(const QList<int> &changedPages, int page)
     removeSnapshots(m_history.push(newPath));
     for (int changedPage : pages) {
         m_formFieldPagesLoaded.remove(changedPage);
+        m_formFieldPagesFailed.remove(changedPage);
         m_view->setFormFields(changedPage, {});
     }
     m_view->refreshSelectedTextAnnotation();
