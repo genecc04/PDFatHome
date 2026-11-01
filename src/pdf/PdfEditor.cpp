@@ -598,6 +598,8 @@ PdfEditor::TextSelection PdfEditor::selectText(int pageIndex, const QPointF &sta
     fz_page *page = nullptr;
     fz_stext_page *textPage = nullptr;
     char *text = nullptr;
+    constexpr int kMaxSelectionQuads = 65536;
+    std::vector<fz_quad> quads(kMaxSelectionQuads);
     fz_var(page);
     fz_var(textPage);
     fz_var(text);
@@ -611,8 +613,6 @@ PdfEditor::TextSelection PdfEditor::selectText(int pageIndex, const QPointF &sta
             fz_snap_selection(m_ctx, textPage, &a, &b, FZ_SELECT_WORDS);
         text = fz_copy_selection(m_ctx, textPage, a, b, 0);
 
-        constexpr int kMaxSelectionQuads = 65536;
-        std::vector<fz_quad> quads(kMaxSelectionQuads);
         const int count = fz_highlight_selection(
             m_ctx, textPage, a, b, quads.data(), int(quads.size()));
         selection.text = QString::fromUtf8(text ? text : "");
