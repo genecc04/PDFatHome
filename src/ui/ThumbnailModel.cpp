@@ -1,5 +1,5 @@
 #include "ThumbnailModel.h"
-#include "RenderDocumentCache.h"
+#include "MuPdfRenderCache.h"
 
 #include <QDebug>
 #include <QRunnable>
@@ -8,7 +8,6 @@
 #include <QPdfDocument>
 #include <QPainter>
 #include <QMimeData>
-#include <QPdfDocumentRenderOptions>
 #include <QTimer>
 
 namespace {
@@ -67,10 +66,8 @@ void ThumbnailModel::setRenderSource(const QString &path, const QString &passwor
     }
 }
 
-void ThumbnailModel::setPageRenderDocument(QPdfDocument *document,
-                                           const QList<int> &changedPages)
+void ThumbnailModel::invalidatePageRenders(const QList<int> &changedPages)
 {
-    m_pageRenderDocument = document;   // no longer used for rendering
     if (changedPages.isEmpty()) {
         m_cache.clear();
         invalidateRenders();
@@ -114,42 +111,33 @@ void ThumbnailModel::dispatchRenders()
 
         m_renderPool.start(QRunnable::create(
             [this, page, generation, path, password]() {
-                // One parsed document per worker thread; the pool has one thread.
-                thread_local RenderDocumentCache renderDocuments;
+                // One MuPDF document per worker thread; the pool has one thread.
+                thread_local MuPdfRenderCache renderer;
 
                 QImage thumbnail;
                 QString error;
-                if (QPdfDocument *document =
-                        renderDocuments.document(path, password, &error)) {
-                    if (page < 0 || page >= document->pageCount()) {
-                        error = QStringLiteral("Page is out of range.");
-                    } else {
-                        const QSizeF pts = document->pagePointSize(page);
-                        if (pts.isEmpty()) {
+                if (renderer.open(path, password, &error)) {
+                    const QSizeF pts = renderer.pagePointSize(page, &error);
+                    if (pts.isEmpty()) {
+                        if (error.isEmpty())
                             error = QStringLiteral("Page has no size.");
-                        } else {
-                            const qreal scale = qMin(kThumbWidth / pts.width(),
-                                                     kThumbHeight / pts.height());
-                            const QSize size(qMax(1, int(pts.width() * scale)),
-                                             qMax(1, int(pts.height() * scale)));
+                    } else {
+                        const qreal scale = qMin(kThumbWidth / pts.width(),
+                                                 kThumbHeight / pts.height());
+                        const QSize size(qMax(1, int(pts.width() * scale)),
+                                         qMax(1, int(pts.height() * scale)));
 
-                            QPdfDocumentRenderOptions options;
-                            options.setRenderFlags(
-                                QPdfDocumentRenderOptions::RenderFlag::Annotations);
-                            const QImage rendered = document->render(page, size, options);
-                            if (rendered.isNull()) {
+                        const QImage rendered = renderer.render(page, size, true, &error);
+                        if (rendered.isNull()) {
+                            if (error.isEmpty())
                                 error = QStringLiteral("Renderer returned an empty image.");
-                            } else {
-                                thumbnail = QImage(rendered.size(), QImage::Format_RGB32);
-                                thumbnail.fill(Qt::white);
-                                QPainter painter(&thumbnail);
-                                painter.drawImage(0, 0, rendered);
-                                painter.end();
-                            }
+                        } else {
+                            // The page is already drawn on white, so this only
+                            // changes the pixel format.
+                            thumbnail = rendered.convertToFormat(QImage::Format_RGB32);
                         }
                     }
                 }
-
                 QMetaObject::invokeMethod(
                     this,
                     [this, page, generation, thumbnail = std::move(thumbnail),

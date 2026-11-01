@@ -38,7 +38,6 @@ constexpr int kNumericControlWidth = 88;
 void MainWindow::setupViewer()
 {
     m_document = new QPdfDocument(this);
-    m_pageRenderDocument = new QPdfDocument(this);
 
     m_view = new PageView(this);
     m_view->setDocument(m_document);

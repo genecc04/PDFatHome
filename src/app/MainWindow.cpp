@@ -52,11 +52,11 @@ MainWindow::~MainWindow()
     m_editor.reset();
 
     if (m_view) {
-        m_view->setPageRenderDocument(nullptr);
+        m_view->invalidatePageRenders();
         m_view->setDocument(nullptr);
     }
     if (m_thumbnails) {
-        m_thumbnails->setPageRenderDocument(nullptr);
+        m_thumbnails->invalidatePageRenders();
         m_thumbnails->setDocument(nullptr);
     }
     if (m_searchDock) {
@@ -67,11 +67,6 @@ MainWindow::~MainWindow()
     if (m_bookmarks)
         m_bookmarks->setDocument(nullptr);
 
-    if (m_pageRenderDocument) {
-        m_pageRenderDocument->close();
-        delete m_pageRenderDocument;
-        m_pageRenderDocument = nullptr;
-    }
     if (m_document) {
         m_document->close();
         delete m_document;
@@ -168,6 +163,7 @@ bool MainWindow::reopenEditor(const QString &path)
 void MainWindow::removeSnapshots(const QStringList &paths)
 {
     for (const QString &path : paths) {
+        m_pageSizeCache.remove(path);
         if (isTempFile(path))
             removeTempFile(path);
     }

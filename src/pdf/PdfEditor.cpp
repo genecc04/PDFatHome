@@ -1,6 +1,9 @@
 #include "PdfEditor.h"
+#include "MuPdfRenderCache.h"
+#include "RenderDocumentBytesCache.h"
 
 #include <QByteArray>
+#include <QFileInfo>
 #include <QUuid>
 #include <vector>
 #include <cstring>
@@ -564,7 +567,8 @@ bool PdfEditor::insertPagesFrom(const QString &sourcePath, int insertAt)
     return true;
 }
 
-bool PdfEditor::highlightText(const QString &text, QList<int> *changedPages)
+bool PdfEditor::highlightText(const QString &text, QList<int> *changedPages,
+                              const std::function<bool(int, int)> &progress)
 {
     if (changedPages)
         changedPages->clear();
@@ -597,6 +601,11 @@ bool PdfEditor::highlightText(const QString &text, QList<int> *changedPages)
     std::vector<fz_quad> quads(kSearchCapacity);
     std::vector<int> marks(kSearchCapacity);
     for (int pageIndex = 0; pageIndex < count; ++pageIndex) {
+        if (progress && !progress(pageIndex, count)) {
+            m_error = "Highlighting was cancelled.";
+            return false;
+        }
+
         pdf_page *page = nullptr;
         int hits = 0;
         fz_var(page);
@@ -1559,4 +1568,197 @@ bool PdfEditor::setFormFieldValue(int pageIndex, int widgetIndex, const QString 
         return false;
     }
     return true;
+}
+
+// background page drawing (see MuPdfRenderCache.h)
+
+namespace {
+// Each render thread has its own MuPDF context, so cap its internal cache.
+constexpr size_t kRenderStoreBytes = 32u * 1024u * 1024u;
+}
+
+MuPdfRenderCache::~MuPdfRenderCache()
+{
+    closeDocument();
+    if (m_ctx)
+        fz_drop_context(m_ctx);
+}
+
+void MuPdfRenderCache::closeDocument()
+{
+    if (m_doc) {
+        pdf_drop_document(m_ctx, m_doc);
+        m_doc = nullptr;
+    }
+    // The document reads from these bytes, so they go only after it is gone.
+    m_bytes.reset();
+    m_path.clear();
+    m_size = -1;
+}
+
+bool MuPdfRenderCache::open(const QString &path, const QString &password,
+                            QString *error)
+{
+    const QFileInfo info(path);
+    const QDateTime modified = info.lastModified();
+    const qint64 size = info.size();
+    if (m_doc && path == m_path && password == m_password
+        && modified == m_modified && size == m_size)
+        return true;
+
+    closeDocument();
+
+    if (!m_ctx)
+        m_ctx = fz_new_context(nullptr, nullptr, kRenderStoreBytes);
+    if (!m_ctx) {
+        *error = QStringLiteral("Could not start the PDF engine for background rendering.");
+        return false;
+    }
+
+    m_bytes = RenderDocumentBytesCache::sharedBytes(path, modified, size, error);
+    if (!m_bytes)
+        return false;
+
+    const QByteArray passUtf8 = password.toUtf8();
+    const char *cPass = passUtf8.constData();
+    const unsigned char *data =
+        reinterpret_cast<const unsigned char *>(m_bytes->constData());
+    const size_t length = size_t(m_bytes->size());
+
+    fz_stream *stream = nullptr;
+    pdf_document *doc = nullptr;
+    fz_var(stream);
+    fz_var(doc);
+
+    fz_try(m_ctx)
+    {
+        stream = fz_open_memory(m_ctx, data, length);
+        doc = pdf_open_document_with_stream(m_ctx, stream);
+        if (fz_needs_password(m_ctx, &doc->super)
+            && !fz_authenticate_password(m_ctx, &doc->super, cPass))
+            fz_throw(m_ctx, FZ_ERROR_GENERIC, "Incorrect or missing password");
+    }
+    fz_always(m_ctx)
+    {
+        // The document keeps its own reference to the stream.
+        if (stream)
+            fz_drop_stream(m_ctx, stream);
+    }
+    fz_catch(m_ctx)
+    {
+        *error = QString::fromUtf8(fz_caught_message(m_ctx));
+        if (doc)
+            pdf_drop_document(m_ctx, doc);
+        m_bytes.reset();
+        return false;
+    }
+
+    m_doc = doc;
+    m_path = path;
+    m_password = password;
+    m_modified = modified;
+    m_size = size;
+    return true;
+}
+
+QSizeF MuPdfRenderCache::pagePointSize(int page, QString *error)
+{
+    if (!m_doc || !m_ctx) {
+        *error = QStringLiteral("No document is open for background rendering.");
+        return QSizeF();
+    }
+
+    fz_page *mupdfPage = nullptr;
+    fz_var(mupdfPage);
+    float width = 0.0f;
+    float height = 0.0f;
+    fz_var(width);
+    fz_var(height);
+
+    fz_try(m_ctx)
+    {
+        mupdfPage = fz_load_page(m_ctx, &m_doc->super, page);
+        const fz_rect bounds = fz_bound_page(m_ctx, mupdfPage);
+        width = bounds.x1 - bounds.x0;
+        height = bounds.y1 - bounds.y0;
+    }
+    fz_always(m_ctx)
+    {
+        if (mupdfPage)
+            fz_drop_page(m_ctx, mupdfPage);
+    }
+    fz_catch(m_ctx)
+    {
+        *error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return QSizeF();
+    }
+    return QSizeF(width, height);
+}
+
+QImage MuPdfRenderCache::render(int page, const QSize &size, bool annotations,
+                                QString *error)
+{
+    if (!m_doc || !m_ctx) {
+        *error = QStringLiteral("No document is open for background rendering.");
+        return QImage();
+    }
+    if (size.width() <= 0 || size.height() <= 0) {
+        *error = QStringLiteral("The requested page size is empty.");
+        return QImage();
+    }
+
+    const int width = size.width();
+    const int height = size.height();
+
+    fz_page *mupdfPage = nullptr;
+    fz_pixmap *pixmap = nullptr;
+    fz_device *device = nullptr;
+    fz_var(mupdfPage);
+    fz_var(pixmap);
+    fz_var(device);
+
+    fz_try(m_ctx)
+    {
+        mupdfPage = fz_load_page(m_ctx, &m_doc->super, page);
+        const fz_rect bounds = fz_bound_page(m_ctx, mupdfPage);
+        const float pageWidth = bounds.x1 - bounds.x0;
+        const float pageHeight = bounds.y1 - bounds.y0;
+        if (pageWidth <= 0.0f || pageHeight <= 0.0f)
+            fz_throw(m_ctx, FZ_ERROR_GENERIC, "Page has no size.");
+
+        fz_matrix transform = fz_translate(-bounds.x0, -bounds.y0);
+        transform = fz_post_scale(transform, width / pageWidth, height / pageHeight);
+
+        pixmap = fz_new_pixmap_with_bbox(m_ctx, fz_device_bgr(m_ctx),
+                                         fz_make_irect(0, 0, width, height),
+                                         nullptr, 0);
+        fz_clear_pixmap_with_value(m_ctx, pixmap, 0xff);
+
+        device = fz_new_draw_device(m_ctx, fz_identity, pixmap);
+        if (annotations)
+            fz_run_page(m_ctx, mupdfPage, device, transform, nullptr);
+        else
+            fz_run_page_contents(m_ctx, mupdfPage, device, transform, nullptr);
+        fz_close_device(m_ctx, device);
+    }
+    fz_always(m_ctx)
+    {
+        if (device)
+            fz_drop_device(m_ctx, device);
+        if (mupdfPage)
+            fz_drop_page(m_ctx, mupdfPage);
+    }
+    fz_catch(m_ctx)
+    {
+        if (pixmap)
+            fz_drop_pixmap(m_ctx, pixmap);
+        *error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return QImage();
+    }
+
+    QImage wrapper(fz_pixmap_samples(m_ctx, pixmap), width, height,
+                   int(fz_pixmap_stride(m_ctx, pixmap)), QImage::Format_BGR888);
+    QImage image = wrapper.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    fz_drop_pixmap(m_ctx, pixmap);
+    return image;
 }

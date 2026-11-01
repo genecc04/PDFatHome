@@ -15,6 +15,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPdfDocument>
+#include <QProgressDialog>
 #include <QStatusBar>
 
 namespace {
@@ -65,6 +66,14 @@ void MainWindow::rotateSelectedPages(int degrees)
     const QList<int> pages = targetPages();
     const int viewPage = m_view->currentPage();
 
+    QVector<QSizeF> sizes = m_view->pageSizes();
+    if (qAbs(degrees) % 180 == 90) {
+        for (int page : pages) {
+            if (page >= 0 && page < sizes.size())
+                sizes[page].transpose();
+        }
+    }
+
     for (int page : pages) {
         if (!m_editor->rotatePage(page, degrees)) {
             QMessageBox::warning(this, "Rotate failed", m_editor->lastError());
@@ -74,7 +83,7 @@ void MainWindow::rotateSelectedPages(int degrees)
         }
     }
 
-    if (refreshAfterEdit(viewPage, pages))
+    if (refreshAfterEdit(viewPage, pages, sizes))
         statusBar()->showMessage(QString("Rotated %1 page(s)").arg(pages.size()), 3000);
 }
 
@@ -83,7 +92,7 @@ void MainWindow::deleteSelectedPages()
     if (!m_editor)
         return;
 
-    const QList<int> pages = targetPages();    // ascending order
+    const QList<int> pages = targetPages();
     const int pageCount = m_document->pageCount();
     if (pages.size() >= pageCount) {
         QMessageBox::information(this, "Delete pages",
@@ -94,14 +103,20 @@ void MainWindow::deleteSelectedPages()
     for (int i = pages.size() - 1; i >= 0; --i) {
         if (!m_editor->deletePage(pages.at(i))) {
             QMessageBox::warning(this, "Delete failed", m_editor->lastError());
-            reopenEditor(m_history.current());   // throw away the half-finished edit
+            reopenEditor(m_history.current());
             updateActions();
             return;
         }
     }
 
+    QVector<QSizeF> sizes = m_view->pageSizes();
+    for (int i = pages.size() - 1; i >= 0; --i) {
+        if (pages.at(i) >= 0 && pages.at(i) < sizes.size())
+            sizes.remove(pages.at(i));
+    }
+
     const int landing = qMin(pages.first(), pageCount - pages.size() - 1);
-    if (refreshAfterEdit(landing))
+    if (refreshAfterEdit(landing, {}, sizes))
         statusBar()->showMessage(QString("Deleted %1 page(s)").arg(pages.size()), 3000);
 }
 
@@ -114,7 +129,11 @@ void MainWindow::movePage(int from, int to)
         QMessageBox::warning(this, "Move failed", m_editor->lastError());
         return;
     }
-    refreshAfterEdit(to);
+
+    QVector<QSizeF> sizes = m_view->pageSizes();
+    if (from >= 0 && from < sizes.size() && to >= 0 && to < sizes.size())
+        sizes.move(from, to);
+    refreshAfterEdit(to, {}, sizes);
 }
 
 void MainWindow::extractPages()
@@ -197,14 +216,35 @@ void MainWindow::highlightText()
     const int page = m_view->currentPage();
     QList<int> changedPages;
 
-    QApplication::setOverrideCursor(Qt::WaitCursor);
-    const bool done = m_editor->highlightText(text.trimmed(), &changedPages);
-    QApplication::restoreOverrideCursor();
+    const QString needle = text.trimmed();
+
+    QProgressDialog progress(QString("Searching for \"%1\"...").arg(needle),
+                             "Cancel", 0, 100, this);
+    progress.setWindowTitle("Highlight text");
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(300);
+    bool cancelled = false;
+
+    const bool done = m_editor->highlightText(
+        needle, &changedPages,
+        [&progress, &cancelled](int pageIndex, int pageTotal) {
+            progress.setMaximum(pageTotal);
+            progress.setValue(pageIndex);
+            if (progress.wasCanceled()) {
+                cancelled = true;
+                return false;
+            }
+            return true;
+        });
+    progress.reset();
 
     if (!done) {
-        QMessageBox::warning(this, "Highlight failed", m_editor->lastError());
+        if (!cancelled)
+            QMessageBox::warning(this, "Highlight failed", m_editor->lastError());
         reopenEditor(m_history.current());
         updateActions();
+        if (cancelled)
+            statusBar()->showMessage("Highlighting cancelled.", 4000);
         return;
     }
     if (changedPages.isEmpty()) {
@@ -400,7 +440,7 @@ bool MainWindow::fillFormField(int page, const QPointF &point, PageView::FormFie
         updateActions();
         return true;
     }
-    refreshAfterEdit(page);
+    refreshAfterEdit(page, {}, m_view->pageSizes());
     return true;
 }
 
@@ -414,7 +454,7 @@ bool MainWindow::commitFormField(int page, int widgetIndex, const QString &value
         updateActions();
         return false;
     }
-    return refreshAfterEdit(page);
+    return refreshAfterEdit(page, {}, m_view->pageSizes());
 }
 
 void MainWindow::placeStrokes(const QVector<PageView::Stroke> &strokes)

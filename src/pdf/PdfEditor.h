@@ -7,6 +7,7 @@
 #include <QVector>
 #include <QByteArray>
 #include <QStringList>
+#include <functional>
 
 struct fz_context;
 struct pdf_document;
@@ -66,7 +67,8 @@ public:
     bool movePage(int fromIndex, int toIndex);
     bool insertPagesFrom(const QString &sourcePath, int insertAt);
     bool deletePage(int pageIndex);
-    bool highlightText(const QString &text, QList<int> *changedPages = nullptr);
+    bool highlightText(const QString &text, QList<int> *changedPages = nullptr,
+                       const std::function<bool(int, int)> &progress = {});
     bool bakeAnnotations();
     bool hasAnnotations();
     bool addInkStroke(int pageIndex, const QVector<QPointF> &points,

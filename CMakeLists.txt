@@ -38,7 +38,8 @@ add_executable(PdfApp WIN32
     src/ui/ThumbnailPane.h
     resources/app_resources.qrc
     resources/pdfappicon.rc
-    src/ui/RenderDocumentCache.h
+    src/ui/RenderDocumentBytesCache.h
+    src/ui/MuPdfRenderCache.h
 )
 
 target_include_directories(PdfApp PRIVATE

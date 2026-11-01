@@ -324,11 +324,18 @@ void MainWindow::goToPage(int page)
 bool MainWindow::showFile(const QString &path, int page, bool reportErrors)
 {
     m_pendingPage = -1;
-    clearPageRenderDocument();
+    clearPageRenderCaches();
     m_document->close();
     m_document->setPassword(m_password);
 
+    const auto knownSizes = m_pageSizeCache.constFind(path);
+    const bool primed = knownSizes != m_pageSizeCache.constEnd();
+    if (primed)
+        m_view->setPageSizeHint(knownSizes.value());
+
     const QPdfDocument::Error error = m_document->load(path);
+    if (primed)
+        m_view->setPageSizeHint(QVector<QSizeF>());
     if (error != QPdfDocument::Error::None) {
         if (reportErrors) {
             QString reason;
@@ -359,6 +366,27 @@ bool MainWindow::showFile(const QString &path, int page, bool reportErrors)
     }
     m_pendingPage = -1;
     const int target = qBound(0, page, pageCount - 1);
+
+    if (primed) {
+        const QVector<QSizeF> shown = m_view->pageSizes();
+        const int samples[] = { 0, pageCount / 2, pageCount - 1, target };
+        for (const int index : samples) {
+            const QSizeF real = m_document->pagePointSize(index);
+            if (index >= shown.size()
+                || qAbs(real.width() - shown.at(index).width()) > 0.5
+                || qAbs(real.height() - shown.at(index).height()) > 0.5) {
+                m_view->rescanPageSizes();
+                break;
+            }
+        }
+    }
+
+    if (isTempFile(path) && m_view->pageSizes().size() == pageCount) {
+        if (m_pageSizeCache.size() > 64)
+            m_pageSizeCache.clear();
+        m_pageSizeCache.insert(path, m_view->pageSizes());
+    }
+
     goToPage(target);
     m_thumbnails->setCurrentPage(target);
     return true;
@@ -379,14 +407,12 @@ void MainWindow::restorePendingPage()
         refreshFormFieldOverlays();
 }
 
-void MainWindow::clearPageRenderDocument()
+void MainWindow::clearPageRenderCaches()
 {
     if (m_view)
-        m_view->setPageRenderDocument(nullptr);
+        m_view->invalidatePageRenders();
     if (m_thumbnails)
-        m_thumbnails->setPageRenderDocument(nullptr);
-    if (m_pageRenderDocument)
-        m_pageRenderDocument->close();
+        m_thumbnails->invalidatePageRenders();
 }
 
 // recent files, about, drops
@@ -565,7 +591,8 @@ bool MainWindow::save()
     return true;
 }
 
-bool MainWindow::refreshAfterEdit(int page, const QList<int> &reselect)
+bool MainWindow::refreshAfterEdit(int page, const QList<int> &reselect,
+                                  const QVector<QSizeF> &pageSizes)
 {
     if (!m_tempDir.isValid()) {
         QMessageBox::warning(this, "Edit failed", "Could not create a temporary folder.");
@@ -582,6 +609,9 @@ bool MainWindow::refreshAfterEdit(int page, const QList<int> &reselect)
         updateActions();
         return false;
     }
+
+    if (!pageSizes.isEmpty())
+        m_pageSizeCache.insert(newPath, pageSizes);
 
     if (!showFile(newPath, page)) {
         QFile::remove(newPath);
@@ -618,7 +648,7 @@ bool MainWindow::refreshAfterPageEdit(const QList<int> &changedPages, int page)
             pages.append(changedPage);
     }
     if (pages.isEmpty())
-        return refreshAfterEdit(page);
+        return refreshAfterEdit(page, {}, m_view->pageSizes());
 
     const QString newPath = m_tempDir.filePath(
         QString("state-%1.pdf").arg(++m_editCount));
@@ -629,22 +659,13 @@ bool MainWindow::refreshAfterPageEdit(const QList<int> &changedPages, int page)
         return false;
     }
 
-    m_pageRenderDocument->close();
-    m_pageRenderDocument->setPassword(m_password);
-    if (m_pageRenderDocument->load(newPath) != QPdfDocument::Error::None) {
-        if (!showFile(newPath, page)) {
-            QFile::remove(newPath);
-            showFile(m_history.current(), page, false);
-            reopenEditor(m_history.current());
-            updateActions();
-            return false;
-        }
-    } else {
-        m_view->setPageRenderDocument(m_pageRenderDocument, pages);
-        m_view->setRenderSource(newPath, m_password);
-        m_thumbnails->setRenderSource(newPath, m_password);
-        m_thumbnails->setPageRenderDocument(m_pageRenderDocument, pages);
-    }
+    m_view->invalidatePageRenders(pages);
+    m_view->setRenderSource(newPath, m_password);
+    m_thumbnails->setRenderSource(newPath, m_password);
+    m_thumbnails->invalidatePageRenders(pages);
+
+    if (m_view->pageSizes().size() == m_document->pageCount())
+        m_pageSizeCache.insert(newPath, m_view->pageSizes());
 
     removeSnapshots(m_history.push(newPath));
     m_view->refreshSelectedTextAnnotation();

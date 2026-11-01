@@ -37,10 +37,9 @@ void ThumbnailPane::setDocument(QPdfDocument *document)
     m_model->setDocument(document);
 }
 
-void ThumbnailPane::setPageRenderDocument(QPdfDocument *document,
-                                          const QList<int> &changedPages)
+void ThumbnailPane::invalidatePageRenders(const QList<int> &changedPages)
 {
-    m_model->setPageRenderDocument(document, changedPages);
+    m_model->invalidatePageRenders(changedPages);
 }
 
 void ThumbnailPane::setRenderSource(const QString &path, const QString &password)

@@ -1,4 +1,5 @@
 #pragma once
+#include <QHash>
 #include <QList>
 #include <QMainWindow>
 #include <QString>
@@ -63,7 +64,7 @@ private:
     bool saveAs();
     void goToPage(int page);
     bool showFile(const QString &path, int page, bool reportErrors = true);
-    void clearPageRenderDocument();
+    void clearPageRenderCaches();
     void restorePendingPage();
     void addRecentFile(const QString &path);
     void setDocumentPassword();
@@ -89,7 +90,8 @@ private:
     void updateTextAnnotationBounds(int page, int annotationId, const QString &text,
                                     const QRectF &bounds);
     void deleteTextAnnotation(int page, int annotationId, const QString &text);
-    bool refreshAfterEdit(int page, const QList<int> &reselect = {});
+    bool refreshAfterEdit(int page, const QList<int> &reselect = {},
+                          const QVector<QSizeF> &pageSizes = {});
     bool refreshAfterPageEdit(const QList<int> &changedPages, int page);
     QList<int> targetPages() const;
     void setupDrawToolbar();
@@ -119,7 +121,6 @@ private:
     PasswordChange m_passwordChange = PasswordChange::None;
 
     QPdfDocument *m_document = nullptr;
-    QPdfDocument *m_pageRenderDocument = nullptr;
     PageView *m_view = nullptr;
     QSpinBox *m_pageBox = nullptr;
     QLabel *m_pageCountLabel = nullptr;
@@ -162,4 +163,5 @@ private:
     QString m_password;
     int m_pendingPage = -1;
     int m_editCount = 0;
+    QHash<QString, QVector<QSizeF>> m_pageSizeCache;
 };

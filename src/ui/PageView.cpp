@@ -1,5 +1,5 @@
 #include "PageView.h"
-#include "RenderDocumentCache.h"
+#include "MuPdfRenderCache.h"
 
 #include <QAbstractItemModel>
 #include <QApplication>
@@ -21,7 +21,6 @@
 #include <QPainterPath>
 #include <QPainterPathStroker>
 #include <QPdfDocument>
-#include <QPdfDocumentRenderOptions>
 #include <QPdfLink>
 #include <QPdfLinkModel>
 #include <QPdfSearchModel>
@@ -141,8 +140,8 @@ double segmentDistanceSquared(const QPointF &a, const QPointF &b,
 
 PageView::PageView(QWidget *parent)
     : QAbstractScrollArea(parent)
-    , m_cache(256 * 1024)
-    , m_baseCache(64 * 1024)
+    , m_cache(96 * 1024)
+    , m_baseCache(32 * 1024)
 {
     m_renderPool.setMaxThreadCount(1);
     setFocusPolicy(Qt::StrongFocus);
@@ -210,8 +209,8 @@ PageView::PageView(QWidget *parent)
 
 PageView::~PageView()
 {
-    invalidatePendingPageRenders();
-    m_renderPool.waitForDone();
+    invalidatePendingPageRenders();   // bump generation and drop renders that haven't started
+    m_renderPool.waitForDone();       // wait only for the render already running, then end the thread
 }
 
 // document and zoom
@@ -258,6 +257,23 @@ void PageView::setPageSizeHint(const QVector<QSizeF> &sizes)
     m_pageSizeHint = sizes;
 }
 
+// Slow (asks the document for every page's size) but always correct. Used as a
+// safety net when sizes we worked out ourselves turn out to be wrong.
+void PageView::rescanPageSizes()
+{
+    if (!m_document || m_document->status() != QPdfDocument::Status::Ready)
+        return;
+
+    const int count = m_document->pageCount();
+    m_pageSizes.clear();
+    m_pageSizes.reserve(count);
+    for (int i = 0; i < count; ++i)
+        m_pageSizes.append(m_document->pagePointSize(i));
+
+    recalculateLayout(true);
+    viewport()->update();
+}
+
 QRect PageView::loadingIndicatorRect() const
 {
     const int side = kLoadingDisplaySize + 2 * kLoadingCardPadding;
@@ -292,10 +308,8 @@ void PageView::setRenderSource(const QString &path, const QString &password)
     viewport()->update();
 }
 
-void PageView::setPageRenderDocument(QPdfDocument *document,
-                                     const QList<int> &changedPages)
+void PageView::invalidatePageRenders(const QList<int> &changedPages)
 {
-    m_pageRenderDocument = document;
     if (changedPages.isEmpty()) {
         m_cache.clear();
         m_baseCache.clear();
@@ -879,24 +893,15 @@ QPixmap PageView::pageImage(int page, const QSize &size, qreal dpr,
         m_renderPool.start(new FunctionRunnable(
             [this, page, key, generation, sourcePath, password, renderSize,
              dpr, includeAnnotations]() {
-                thread_local RenderDocumentCache renderDocuments;
+                thread_local MuPdfRenderCache renderer;
 
                 QImage image;
                 QString error;
-                if (QPdfDocument *document =
-                        renderDocuments.document(sourcePath, password, &error)) {
-                    QPdfDocumentRenderOptions options;
-                    if (includeAnnotations) {
-                        options.setRenderFlags(
-                            QPdfDocumentRenderOptions::RenderFlag::Annotations);
-                    }
-                    image = document->render(page, renderSize, options);
-                    if (image.isNull())
+                if (renderer.open(sourcePath, password, &error)) {
+                    image = renderer.render(page, renderSize, includeAnnotations, &error);
+                    if (image.isNull() && error.isEmpty())
                         error = QStringLiteral("PDF renderer returned an empty page image.");
-                    else
-                        image.convertTo(QImage::Format_ARGB32_Premultiplied);
                 }
-
                 QMetaObject::invokeMethod(
                     this,
                     [this, page, key, generation, dpr, includeAnnotations,

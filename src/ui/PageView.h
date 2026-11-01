@@ -74,10 +74,11 @@ public:
     void setDocument(QPdfDocument *document);
     void setLoading(bool loading);
     void setPageSizeHint(const QVector<QSizeF> &sizes);
+    QVector<QSizeF> pageSizes() const { return m_pageSizes; }
+    void rescanPageSizes();
     void stepLoading();
     void setRenderSource(const QString &path, const QString &password = QString());
-    void setPageRenderDocument(QPdfDocument *document,
-                               const QList<int> &changedPages = {});
+    void invalidatePageRenders(const QList<int> &changedPages = {});
     void setSearchModel(QPdfSearchModel *model);
     void setCurrentSearchResultIndex(int index);
 
@@ -249,7 +250,6 @@ private:
     int textAnnotationResizeHandleAt(const QPoint &pos) const;
 
     QPdfDocument *m_document = nullptr;
-    QPdfDocument *m_pageRenderDocument = nullptr;
     QString m_renderSourcePath;
     QString m_renderPassword;
     quint64 m_renderGeneration = 0;
