@@ -2083,7 +2083,8 @@ void PageView::contextMenuEvent(QContextMenuEvent *event)
     if (m_loading)
         return;
 
-    if (m_textTool || m_drawTool || m_editor || m_imageAwaiting || m_imageActive)
+    if (m_textTool || m_drawTool || m_redactionTool || m_editor
+        || m_imageAwaiting || m_imageActive)
         return;
 
     const int page = pageAtViewportPoint(event->pos());
@@ -2128,17 +2129,17 @@ void PageView::contextMenuEvent(QContextMenuEvent *event)
     all->setShortcut(QKeySequence::SelectAll);
 
     const QAction *chosen = menu.exec(event->globalPos());
-    if (chosen == editAnnotation) {
+    if (chosen && chosen == editAnnotation) {
         emit textAnnotationEditRequested(m_selectedTextAnnotationPage,
                                          m_selectedTextAnnotationId,
                                          m_selectedTextAnnotationContents);
-    } else if (chosen == deleteAnnotation) {
+    } else if (chosen && chosen == deleteAnnotation) {
         deleteSelectedTextAnnotation();
-    } else if (chosen == deleteImage) {
+    } else if (chosen && chosen == deleteImage) {
         deleteSelectedImageStamp();
-    } else if (chosen == copy) {
+    } else if (chosen && chosen == copy) {
         copySelection();
-    } else if (chosen == all) {
+    } else if (chosen && chosen == all) {
         selectAllText();
     }
 }
