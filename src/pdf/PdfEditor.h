@@ -11,6 +11,7 @@
 #include <QStringList>
 #include <QUrl>
 #include <functional>
+#include <memory>
 
 struct fz_context;
 struct pdf_document;
@@ -125,8 +126,13 @@ public:
     QString lastError() const { return m_error; }
 
 private:
+    struct SelectionTextCache;
+    bool cacheSelectionTextPage(int pageIndex);
+    void clearSelectionTextCache();
+
     fz_context *m_ctx = nullptr;
     pdf_document *m_doc = nullptr;
+    std::unique_ptr<SelectionTextCache> m_selectionTextCache;
     QString m_error;
     QString m_path;
 };

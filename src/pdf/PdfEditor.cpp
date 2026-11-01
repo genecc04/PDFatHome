@@ -19,6 +19,16 @@ namespace {
 
 constexpr size_t kEditorStoreBytes = 64u * 1024u * 1024u;
 
+}
+
+struct PdfEditor::SelectionTextCache
+{
+    fz_stext_page *page = nullptr;
+    int pageIndex = -1;
+};
+
+namespace {
+
 QRectF quadBounds(const fz_quad &quad)
 {
     const float left = qMin(qMin(quad.ul.x, quad.ur.x), qMin(quad.ll.x, quad.lr.x));
@@ -303,11 +313,59 @@ PdfEditor::~PdfEditor()
 
 void PdfEditor::close()
 {
+    clearSelectionTextCache();
     if (m_doc) {
         pdf_drop_document(m_ctx, m_doc);
         m_doc = nullptr;
     }
     m_path.clear();
+}
+
+void PdfEditor::clearSelectionTextCache()
+{
+    if (m_selectionTextCache && m_selectionTextCache->page && m_ctx)
+        fz_drop_stext_page(m_ctx, m_selectionTextCache->page);
+    m_selectionTextCache.reset();
+}
+
+bool PdfEditor::cacheSelectionTextPage(int pageIndex)
+{
+    if (m_selectionTextCache && m_selectionTextCache->page
+        && m_selectionTextCache->pageIndex == pageIndex)
+        return true;
+
+    auto cache = std::make_unique<SelectionTextCache>();
+    fz_page *page = nullptr;
+    fz_stext_page *textPage = nullptr;
+    int succeeded = 0;
+    fz_var(page);
+    fz_var(textPage);
+    fz_var(succeeded);
+
+    fz_try(m_ctx)
+    {
+        page = fz_load_page(m_ctx, &m_doc->super, pageIndex);
+        textPage = fz_new_stext_page_from_page(m_ctx, page, nullptr);
+        succeeded = 1;
+    }
+    fz_always(m_ctx)
+    {
+        if (page)
+            fz_drop_page(m_ctx, page);
+        if (!succeeded && textPage)
+            fz_drop_stext_page(m_ctx, textPage);
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return false;
+    }
+
+    clearSelectionTextCache();
+    cache->page = textPage;
+    cache->pageIndex = pageIndex;
+    m_selectionTextCache = std::move(cache);
+    return true;
 }
 
 bool PdfEditor::open(const QString &path, const QString &password)
@@ -603,26 +661,26 @@ PdfEditor::TextSelection PdfEditor::selectText(int pageIndex, const QPointF &sta
         return selection;
     }
 
-    fz_page *page = nullptr;
-    fz_stext_page *textPage = nullptr;
+    if (!cacheSelectionTextPage(pageIndex))
+        return selection;
+
     char *text = nullptr;
     constexpr int kMaxSelectionQuads = 65536;
-    std::vector<fz_quad> quads(kMaxSelectionQuads);
-    fz_var(page);
-    fz_var(textPage);
+    static thread_local std::vector<fz_quad> quads;
+    if (quads.size() != kMaxSelectionQuads)
+        quads.resize(kMaxSelectionQuads);
     fz_var(text);
     fz_try(m_ctx)
     {
-        page = fz_load_page(m_ctx, &m_doc->super, pageIndex);
-        textPage = fz_new_stext_page_from_page(m_ctx, page, nullptr);
         fz_point a = fz_make_point(float(start.x()), float(start.y()));
         fz_point b = fz_make_point(float(end.x()), float(end.y()));
         if (snapToWords)
-            fz_snap_selection(m_ctx, textPage, &a, &b, FZ_SELECT_WORDS);
-        text = fz_copy_selection(m_ctx, textPage, a, b, 0);
+            fz_snap_selection(m_ctx, m_selectionTextCache->page,
+                              &a, &b, FZ_SELECT_WORDS);
+        text = fz_copy_selection(m_ctx, m_selectionTextCache->page, a, b, 0);
 
         const int count = fz_highlight_selection(
-            m_ctx, textPage, a, b, quads.data(), int(quads.size()));
+            m_ctx, m_selectionTextCache->page, a, b, quads.data(), int(quads.size()));
         selection.text = QString::fromUtf8(text ? text : "");
         selection.bounds.reserve(qMax(0, count));
         for (int i = 0; i < count; ++i)
@@ -631,8 +689,6 @@ PdfEditor::TextSelection PdfEditor::selectText(int pageIndex, const QPointF &sta
     fz_always(m_ctx)
     {
         fz_free(m_ctx, text);
-        fz_drop_stext_page(m_ctx, textPage);
-        fz_drop_page(m_ctx, page);
     }
     fz_catch(m_ctx)
     {
@@ -702,6 +758,7 @@ bool PdfEditor::rotatePage(int pageIndex, int deltaDegrees)
         return false;
     }
 
+    clearSelectionTextCache();
     fz_try(m_ctx)
     {
         pdf_obj *pageObj = pdf_lookup_page_obj(m_ctx, m_doc, pageIndex);
@@ -728,6 +785,7 @@ bool PdfEditor::deletePage(int pageIndex)
         return false;
     }
 
+    clearSelectionTextCache();
     fz_try(m_ctx)
     {
         const int count = pdf_count_pages(m_ctx, m_doc);
@@ -772,6 +830,7 @@ bool PdfEditor::movePage(int fromIndex, int toIndex)
     if (fromIndex == toIndex)
         return true;
 
+    clearSelectionTextCache();
     std::vector<int> order;
     for (int i = 0; i < count; ++i) {
         if (i != fromIndex)
@@ -816,6 +875,7 @@ bool PdfEditor::keepOnlyPages(int firstIndex, int lastIndex)
         return false;
     }
 
+    clearSelectionTextCache();
     std::vector<int> keep;
     for (int i = firstIndex; i <= lastIndex; ++i)
         keep.push_back(i);
@@ -844,6 +904,7 @@ bool PdfEditor::insertPagesFrom(const QString &sourcePath, int insertAt)
     const QByteArray pathUtf8 = sourcePath.toUtf8();
     const char *cPath = pathUtf8.constData();
 
+    clearSelectionTextCache();
     pdf_document *src = nullptr;
     pdf_graft_map *map = nullptr;
     fz_var(src);
@@ -913,6 +974,7 @@ bool PdfEditor::highlightText(const QString &text, QList<int> *changedPages,
     constexpr int kSearchCapacity = kMaxHitsPerPage + 1;
     std::vector<fz_quad> quads(kSearchCapacity);
     std::vector<int> marks(kSearchCapacity);
+    clearSelectionTextCache();
     for (int pageIndex = 0; pageIndex < count; ++pageIndex) {
         if (progress && !progress(pageIndex, count)) {
             m_error = "Highlighting was cancelled.";
@@ -971,6 +1033,7 @@ bool PdfEditor::bakeAnnotations()
         return false;
     }
 
+    clearSelectionTextCache();
     fz_try(m_ctx)
     {
         pdf_bake_document(m_ctx, m_doc, 1, 0);
@@ -1048,6 +1111,7 @@ bool PdfEditor::addTextBox(int pageIndex, const QRectF &box, const QString &text
     const fz_rect rect = fz_make_rect(float(box.left()), float(box.top()),
                                       float(box.right()), float(box.bottom()));
 
+    clearSelectionTextCache();
     pdf_page *page = nullptr;
     pdf_annot *annot = nullptr;
     fz_var(page);
@@ -1182,6 +1246,7 @@ bool PdfEditor::updateTextAnnotation(int pageIndex, int annotationId,
     }
 
     const QByteArray newTextUtf8 = newText.toUtf8();
+    clearSelectionTextCache();
     pdf_page *page = nullptr;
     bool found = false;
     fz_var(page);
@@ -1230,6 +1295,7 @@ bool PdfEditor::setTextAnnotationBounds(int pageIndex, int annotationId,
 
     const fz_rect rect = fz_make_rect(float(bounds.left()), float(bounds.top()),
                                       float(bounds.right()), float(bounds.bottom()));
+    clearSelectionTextCache();
     pdf_page *page = nullptr;
     bool found = false;
     fz_var(page);
@@ -1271,6 +1337,7 @@ bool PdfEditor::deleteTextAnnotation(int pageIndex, int annotationId, const QStr
         return false;
     }
 
+    clearSelectionTextCache();
     pdf_page *page = nullptr;
     bool found = false;
     fz_var(page);
@@ -1322,6 +1389,7 @@ bool PdfEditor::addInkStroke(int pageIndex, const QVector<QPointF> &points,
     const int count = int(stroke.size());
     const float color[3] = { red, green, blue };
 
+    clearSelectionTextCache();
     pdf_page *page = nullptr;
     pdf_annot *annot = nullptr;
     fz_var(page);
@@ -1452,6 +1520,7 @@ bool PdfEditor::eraseInk(int pageIndex, const QVector<QPointF> &path, double rad
     std::vector<fz_point> vertices;
     std::vector<int> keptStrokeCounts;
     std::vector<fz_point> keptVertices;
+    clearSelectionTextCache();
     fz_var(page);
     fz_var(annot);
     fz_var(next);
@@ -1540,6 +1609,7 @@ bool PdfEditor::addImageStamp(int pageIndex, const QRectF &box, const QByteArray
     const fz_rect rect = fz_make_rect(float(box.left()), float(box.top()),
                                       float(box.right()), float(box.bottom()));
 
+    clearSelectionTextCache();
     pdf_page *page = nullptr;
     pdf_annot *annot = nullptr;
     fz_buffer *buffer = nullptr;
@@ -1837,6 +1907,7 @@ bool PdfEditor::setFormFieldValue(int pageIndex, int widgetIndex, const QString 
     }
 
     const QByteArray valueUtf8 = value.toUtf8();
+    clearSelectionTextCache();
     pdf_page *page = nullptr;
     int found = 0;
     int accepted = 0;
