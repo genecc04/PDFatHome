@@ -139,6 +139,7 @@ void MainWindow::updateActions()
 
     m_saveAction->setEnabled(editable && isDocumentModified());
     m_saveAsAction->setEnabled(editable);
+    m_optimizeAction->setEnabled(editable);
     m_setPasswordAction->setEnabled(editable);
     m_removePasswordAction->setEnabled(editable && isPasswordProtected());
     m_extractAction->setEnabled(editable);

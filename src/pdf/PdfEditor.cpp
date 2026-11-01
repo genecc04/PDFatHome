@@ -862,6 +862,55 @@ bool PdfEditor::movePage(int fromIndex, int toIndex)
     return true;
 }
 
+bool PdfEditor::optimizeAs(const QString &path, Encryption encryption,
+                           const QString &password)
+{
+    m_error.clear();
+    if (!m_doc) {
+        m_error = "No document is open.";
+        return false;
+    }
+
+    const QByteArray pathUtf8 = path.toUtf8();
+    const QByteArray passUtf8 = password.toUtf8();
+    pdf_write_options opts = pdf_default_write_options;
+    opts.do_garbage = 3;
+    opts.do_compress = 1;
+    opts.do_compress_images = 1;
+    opts.do_compress_fonts = 1;
+
+    switch (encryption) {
+    case Encryption::Keep:
+        break;
+    case Encryption::Remove:
+        opts.do_encrypt = PDF_ENCRYPT_NONE;
+        break;
+    case Encryption::Aes256:
+        if (passUtf8.isEmpty() || passUtf8.size() >= int(sizeof(opts.upwd_utf8))) {
+            m_error = "The password must be between 1 and 127 characters.";
+            return false;
+        }
+        opts.do_encrypt = PDF_ENCRYPT_AES_256;
+        opts.permissions = -1;
+        std::memset(opts.upwd_utf8, 0, sizeof(opts.upwd_utf8));
+        std::memset(opts.opwd_utf8, 0, sizeof(opts.opwd_utf8));
+        std::memcpy(opts.upwd_utf8, passUtf8.constData(), size_t(passUtf8.size()));
+        std::memcpy(opts.opwd_utf8, passUtf8.constData(), size_t(passUtf8.size()));
+        break;
+    }
+
+    fz_try(m_ctx)
+    {
+        pdf_save_document(m_ctx, m_doc, pathUtf8.constData(), &opts);
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return false;
+    }
+    return true;
+}
+
 bool PdfEditor::exportPages(const QStringList &outputPaths, const QString &format,
                             int firstPage, int resolution)
 {

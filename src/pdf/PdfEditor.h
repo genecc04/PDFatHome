@@ -116,6 +116,8 @@ public:
     bool saveAs(const QString &path, bool removeUnused = false,
                 Encryption encryption = Encryption::Keep,
                 const QString &password = QString());
+    bool optimizeAs(const QString &path, Encryption encryption = Encryption::Keep,
+                    const QString &password = QString());
     bool exportPages(const QStringList &outputPaths, const QString &format,
                      int firstPage, int resolution = 150);
     bool keepOnlyPages(int firstIndex, int lastIndex);

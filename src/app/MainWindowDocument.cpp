@@ -528,6 +528,45 @@ bool MainWindow::saveAs()
     return true;
 }
 
+void MainWindow::optimizePdf()
+{
+    m_view->commitPendingEdits();
+    if (!m_editor)
+        return;
+
+    const QString defaultName =
+        QFileInfo(m_currentPath).completeBaseName() + "-optimized.pdf";
+    const QString dest = QFileDialog::getSaveFileName(
+        this, "Save optimized PDF copy", defaultName, "PDF files (*.pdf)");
+    if (dest.isEmpty())
+        return;
+
+    if (QFileInfo(dest) == QFileInfo(m_currentPath)
+        || QFileInfo(dest) == QFileInfo(m_history.current())) {
+        QMessageBox::warning(this, "Optimize PDF",
+                             "Choose a different file name to keep the original unchanged.");
+        return;
+    }
+
+    const qint64 sourceSize = QFileInfo(m_history.current()).size();
+    EditOperationGuard operation(this);
+    PdfEditor optimizer;
+    if (!optimizer.open(m_history.current(), m_password)
+        || !optimizer.optimizeAs(dest, saveEncryption(), m_newPassword)) {
+        QMessageBox::warning(this, "Optimize failed", optimizer.lastError());
+        return;
+    }
+
+    const qint64 optimizedSize = QFileInfo(dest).size();
+    const QString sizeSummary =
+        QString("%1 MB → %2 MB")
+            .arg(sourceSize / (1024.0 * 1024.0), 0, 'f', 2)
+            .arg(optimizedSize / (1024.0 * 1024.0), 0, 'f', 2);
+    statusBar()->showMessage(
+        "Saved optimized copy: " + QFileInfo(dest).fileName() + " (" + sizeSummary + ")",
+        6000);
+}
+
 bool MainWindow::save()
 {
     m_view->commitPendingEdits();

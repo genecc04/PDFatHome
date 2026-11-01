@@ -26,6 +26,8 @@ web links embedded in a PDF in your default browser after you confirm.
 - Undo and redo (up to 20 steps)
 - Save in place (Ctrl+S) or save a copy (Save As). Saving replaces the file safely,
   so a failed save never costs you the original
+- Create a losslessly optimized PDF copy by compressing streams and removing unused
+  or duplicate objects; images are not downsampled
 - Export selected page ranges as 150-DPI PNG images or SVG files; multi-page
   exports are numbered
 

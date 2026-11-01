@@ -290,6 +290,9 @@ void MainWindow::setupMenus()
     m_saveAsAction->setShortcut(QKeySequence::SaveAs);
     connect(m_saveAsAction, &QAction::triggered, this, &MainWindow::saveAs);
 
+    m_optimizeAction = fileMenu->addAction("Optimize PDF (lossless)...");
+    connect(m_optimizeAction, &QAction::triggered, this, &MainWindow::optimizePdf);
+
     m_extractAction = fileMenu->addAction("&Extract pages...");
     connect(m_extractAction, &QAction::triggered, this, &MainWindow::extractPages);
 
