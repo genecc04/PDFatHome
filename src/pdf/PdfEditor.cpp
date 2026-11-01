@@ -17,6 +17,8 @@ extern "C" {
 
 namespace {
 
+constexpr size_t kEditorStoreBytes = 64u * 1024u * 1024u;
+
 QRectF quadBounds(const fz_quad &quad)
 {
     const float left = qMin(qMin(quad.ul.x, quad.ur.x), qMin(quad.ll.x, quad.lr.x));
@@ -289,7 +291,7 @@ bool strokeHitsPath(const std::vector<fz_point> &vertices, ErasePathIndex &path,
 
 PdfEditor::PdfEditor()
 {
-    m_ctx = fz_new_context(nullptr, nullptr, FZ_STORE_DEFAULT);
+    m_ctx = fz_new_context(nullptr, nullptr, kEditorStoreBytes);
 }
 
 PdfEditor::~PdfEditor()
@@ -2031,6 +2033,83 @@ QImage MuPdfRenderCache::render(int page, const QSize &size, bool annotations,
 
         fz_matrix transform = fz_translate(-bounds.x0, -bounds.y0);
         transform = fz_post_scale(transform, width / pageWidth, height / pageHeight);
+
+        pixmap = fz_new_pixmap_with_bbox(m_ctx, fz_device_bgr(m_ctx),
+                                         fz_make_irect(0, 0, width, height),
+                                         nullptr, 0);
+        fz_clear_pixmap_with_value(m_ctx, pixmap, 0xff);
+
+        device = fz_new_draw_device(m_ctx, fz_identity, pixmap);
+        if (annotations)
+            fz_run_page(m_ctx, mupdfPage, device, transform, nullptr);
+        else
+            fz_run_page_contents(m_ctx, mupdfPage, device, transform, nullptr);
+        fz_close_device(m_ctx, device);
+    }
+    fz_always(m_ctx)
+    {
+        if (device)
+            fz_drop_device(m_ctx, device);
+        if (mupdfPage)
+            fz_drop_page(m_ctx, mupdfPage);
+    }
+    fz_catch(m_ctx)
+    {
+        if (pixmap)
+            fz_drop_pixmap(m_ctx, pixmap);
+        *error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return QImage();
+    }
+
+    QImage wrapper(fz_pixmap_samples(m_ctx, pixmap), width, height,
+                   int(fz_pixmap_stride(m_ctx, pixmap)), QImage::Format_BGR888);
+    QImage image = wrapper.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    fz_drop_pixmap(m_ctx, pixmap);
+    return image;
+}
+
+QImage MuPdfRenderCache::renderRegion(int page, const QRectF &pageRegion,
+                                      const QSize &size, bool annotations,
+                                      QString *error)
+{
+    if (!m_doc || !m_ctx) {
+        *error = QStringLiteral("No document is open for background rendering.");
+        return QImage();
+    }
+    if (size.width() <= 0 || size.height() <= 0
+        || pageRegion.width() <= 0.0 || pageRegion.height() <= 0.0) {
+        *error = QStringLiteral("The requested page region or output size is empty.");
+        return QImage();
+    }
+
+    const int width = size.width();
+    const int height = size.height();
+    fz_page *mupdfPage = nullptr;
+    fz_pixmap *pixmap = nullptr;
+    fz_device *device = nullptr;
+    fz_var(mupdfPage);
+    fz_var(pixmap);
+    fz_var(device);
+
+    fz_try(m_ctx)
+    {
+        mupdfPage = fz_load_page(m_ctx, &m_doc->super, page);
+        const fz_rect bounds = fz_bound_page(m_ctx, mupdfPage);
+        const float pageWidth = bounds.x1 - bounds.x0;
+        const float pageHeight = bounds.y1 - bounds.y0;
+        if (pageWidth <= 0.0f || pageHeight <= 0.0f)
+            fz_throw(m_ctx, FZ_ERROR_GENERIC, "Page has no size.");
+
+        const float left = bounds.x0 + float(pageRegion.left());
+        const float top = bounds.y0 + float(pageRegion.top());
+        const float right = qMin(bounds.x1, bounds.x0 + float(pageRegion.right()));
+        const float bottom = qMin(bounds.y1, bounds.y0 + float(pageRegion.bottom()));
+        if (right <= left || bottom <= top)
+            fz_throw(m_ctx, FZ_ERROR_GENERIC, "The requested page region is outside the page.");
+
+        fz_matrix transform = fz_translate(-left, -top);
+        transform = fz_post_scale(transform, width / (right - left),
+                                  height / (bottom - top));
 
         pixmap = fz_new_pixmap_with_bbox(m_ctx, fz_device_bgr(m_ctx),
                                          fz_make_irect(0, 0, width, height),

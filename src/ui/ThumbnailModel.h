@@ -24,6 +24,7 @@ public:
 
     void setDocument(PdfEditor *document);
     void invalidatePageRenders(const QList<int> &changedPages = {});
+    void setVisiblePageRange(int first, int last, int priorityPage);
 
     int rowCount(const QModelIndex &parent = {}) const override;
     QVariant data(const QModelIndex &index, int role) const override;
@@ -50,5 +51,8 @@ private:
     mutable QQueue<int> m_renderQueue;
     mutable QSet<int> m_queuedPages;
     mutable bool m_renderQueueSaturated = false;
+    int m_visibleFirst = -1;
+    int m_visibleLast = -1;
+    int m_priorityPage = -1;
     QTimer *m_renderTimer = nullptr;
 };

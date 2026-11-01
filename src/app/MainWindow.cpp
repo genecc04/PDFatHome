@@ -146,6 +146,10 @@ void MainWindow::updateActions()
 
 bool MainWindow::reopenEditor(const QString &path)
 {
+    m_formFieldPagesLoaded.clear();
+    if (m_view)
+        m_view->clearFormFieldOverlays();
+
     auto editor = std::make_unique<PdfEditor>();
     if (!editor->open(path, m_password)) {
         if (m_view)
@@ -309,29 +313,40 @@ bool MainWindow::openWorkingCopy(const QString &source, int page)
     return shown;
 }
 
-bool MainWindow::refreshFormFieldOverlays(
-    const QVector<QVector<PdfEditor::FormField>> *prefetched)
+bool MainWindow::refreshFormFieldOverlays(int firstPage, int lastPage)
 {
     if (!m_editor || !m_document)
         return false;
 
-    m_view->clearFormFieldOverlays();
-
     const int pageCount = m_document->pageCount();
-    for (int pageIndex = 0; pageIndex < pageCount; ++pageIndex) {
+    if (pageCount <= 0)
+        return true;
+
+    if (firstPage < 0 || lastPage < firstPage) {
+        const QPair<int, int> visibleRange = m_view->visiblePageRange();
+        firstPage = visibleRange.first;
+        lastPage = visibleRange.second;
+    }
+    if (firstPage < 0 || lastPage < firstPage)
+        return true;
+
+    constexpr int prefetchPages = 1;
+    const int keepFirstPage = qMax(0, firstPage - prefetchPages);
+    const int keepLastPage = qMin(pageCount - 1, lastPage + prefetchPages);
+    QSet<int> pagesToKeep;
+
+    for (int pageIndex = keepFirstPage; pageIndex <= keepLastPage; ++pageIndex) {
+        pagesToKeep.insert(pageIndex);
+        if (m_formFieldPagesLoaded.contains(pageIndex))
+            continue;
+
         QVector<PdfEditor::FormField> editorFields;
-        if (prefetched) {
-            if (pageIndex < prefetched->size())
-                editorFields = prefetched->at(pageIndex);
-        } else if (!m_editor->formFieldsOnPage(pageIndex, &editorFields)) {
+        if (!m_editor->formFieldsOnPage(pageIndex, &editorFields)) {
             QMessageBox::warning(this, "Form fields",
                                  "Could not load form fields for display: "
                                      + m_editor->lastError());
-            m_view->clearFormFieldOverlays();
             return false;
         }
-        if (editorFields.isEmpty())
-            continue;
 
         QVector<PageView::FormField> viewFields;
         viewFields.reserve(editorFields.size());
@@ -369,6 +384,15 @@ bool MainWindow::refreshFormFieldOverlays(
             viewFields.append(viewField);
         }
         m_view->setFormFields(pageIndex, viewFields);
+        m_formFieldPagesLoaded.insert(pageIndex);
+    }
+
+    const QSet<int> loadedPages = m_formFieldPagesLoaded;
+    for (int pageIndex : loadedPages) {
+        if (pagesToKeep.contains(pageIndex))
+            continue;
+        m_view->setFormFields(pageIndex, {});
+        m_formFieldPagesLoaded.remove(pageIndex);
     }
     return true;
 }

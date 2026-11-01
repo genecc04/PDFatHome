@@ -200,6 +200,10 @@ void MainWindow::setupThumbnailPane()
     connect(m_thumbnails, &ThumbnailPane::pageRequested, this, &MainWindow::goToPage);
     connect(m_view, &PageView::currentPageChanged,
             m_thumbnails, &ThumbnailPane::setCurrentPage);
+    connect(m_view, &PageView::visiblePageRangeChanged, this,
+            [this](int firstPage, int lastPage) {
+                refreshFormFieldOverlays(firstPage, lastPage);
+            });
 
     connect(m_thumbnails, &ThumbnailPane::pageMoveRequested, this,
             &MainWindow::movePage, Qt::QueuedConnection);

@@ -3,6 +3,7 @@
 #include <QListView>
 
 class QDropEvent;
+class QResizeEvent;
 class PdfEditor;
 class ThumbnailModel;
 
@@ -28,8 +29,12 @@ signals:
 protected:
     void dropEvent(QDropEvent *event) override;
     void startDrag(Qt::DropActions supportedActions) override;
+    void resizeEvent(QResizeEvent *event) override;
+    void scrollContentsBy(int dx, int dy) override;
 
 private:
+    void updateVisiblePageRange();
+
     ThumbnailModel *m_model = nullptr;
     bool m_syncing = false;
 };

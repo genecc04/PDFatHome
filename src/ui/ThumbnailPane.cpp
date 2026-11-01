@@ -4,6 +4,9 @@
 #include <QDropEvent>
 #include <QItemSelectionModel>
 #include <QMimeData>
+#include <QResizeEvent>
+#include <QScrollBar>
+#include <QTimer>
 
 #include <algorithm>
 
@@ -30,11 +33,17 @@ ThumbnailPane::ThumbnailPane(QWidget *parent)
                     return;
                 emit pageRequested(current.row());
             });
+    connect(verticalScrollBar(), &QScrollBar::valueChanged,
+            this, &ThumbnailPane::updateVisiblePageRange);
+    connect(m_model, &QAbstractItemModel::modelReset, this, [this]() {
+        QTimer::singleShot(0, this, &ThumbnailPane::updateVisiblePageRange);
+    });
 }
 
 void ThumbnailPane::setDocument(PdfEditor *document)
 {
     m_model->setDocument(document);
+    QTimer::singleShot(0, this, &ThumbnailPane::updateVisiblePageRange);
 }
 
 void ThumbnailPane::invalidatePageRenders(const QList<int> &changedPages)
@@ -62,6 +71,49 @@ void ThumbnailPane::setCurrentPage(int page)
     scrollTo(index);
 
     m_syncing = false;
+    updateVisiblePageRange();
+}
+
+void ThumbnailPane::updateVisiblePageRange()
+{
+    if (!m_model || m_model->rowCount() <= 0 || viewport()->height() <= 0) {
+        if (m_model)
+            m_model->setVisiblePageRange(-1, -1, -1);
+        return;
+    }
+
+    const int centerX = viewport()->width() / 2;
+    const auto rowAtEdge = [this, centerX](int edge, int direction) {
+        const int limit = qMin(64, viewport()->height());
+        for (int offset = 0; offset <= limit; ++offset) {
+            const int y = edge + offset * direction;
+            if (y < 0 || y >= viewport()->height())
+                break;
+            const QModelIndex item = indexAt(QPoint(centerX, y));
+            if (item.isValid())
+                return item.row();
+        }
+        return -1;
+    };
+
+    const int first = rowAtEdge(0, 1);
+    const int last = rowAtEdge(viewport()->height() - 1, -1);
+    if (first >= 0 && last >= first)
+        m_model->setVisiblePageRange(first, last, currentIndex().row());
+    else
+        m_model->setVisiblePageRange(-1, -1, -1);
+}
+
+void ThumbnailPane::resizeEvent(QResizeEvent *event)
+{
+    QListView::resizeEvent(event);
+    updateVisiblePageRange();
+}
+
+void ThumbnailPane::scrollContentsBy(int dx, int dy)
+{
+    QListView::scrollContentsBy(dx, dy);
+    updateVisiblePageRange();
 }
 
 void ThumbnailPane::setReorderEnabled(bool enabled)

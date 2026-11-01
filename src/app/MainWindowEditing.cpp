@@ -525,7 +525,6 @@ void MainWindow::stepHistory(const QString &path)
     if (!showFile(path, page))
         return;
 
-    m_view->clearFormFieldOverlays();
     refreshFormFieldOverlays();
 
     updateActions();

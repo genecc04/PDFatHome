@@ -5,6 +5,7 @@
 #include <QImage>
 #include <QList>
 #include <QPixmap>
+#include <QPair>
 #include <QPointF>
 #include <QPolygonF>
 #include <QRect>
@@ -74,6 +75,7 @@ public:
     void setLoading(bool loading);
     void setPageSizeHint(const QVector<QSizeF> &sizes);
     QVector<QSizeF> pageSizes() const { return m_pageSizes; }
+    QPair<int, int> visiblePageRange() const;
     void stepLoading();
     void setRenderSource(const QString &path, const QString &password = QString());
     void invalidatePageRenders(const QList<int> &changedPages = {});
@@ -125,6 +127,7 @@ public:
 
 signals:
     void currentPageChanged(int page);
+    void visiblePageRangeChanged(int firstPage, int lastPage);
     void textPlaced(int page, const QRectF &boxPoints, const QString &text,
                     const PageView::TextStyle &style);
     void textToolFinished();
@@ -194,12 +197,16 @@ private:
 
     void onDocumentChanged();
     void invalidatePendingPageRenders();
+    void discardQueuedPageRenders();
+    void trimPageImageCaches();
+    void enforcePageRasterBudget();
     void recalculateLayout(bool keepPosition);
     double fitPageZoomFactor() const;
     void positionEmptyStateButton();
     QRect loadingIndicatorRect() const;
     void drawLoadingIndicator(QPainter &painter);
     void updateCurrentPage();
+    void updateVisiblePageRange();
     int pageAtViewportPoint(const QPoint &point) const;
     const QVector<PdfEditor::Link> &linksOnPage(int page);
     void loadPageLinks(int page);
@@ -210,6 +217,10 @@ private:
     QPointF pagePointFor(int page, const QPoint &viewportPos) const;
     QPixmap pageImage(int page, const QSize &size, qreal dpr,
                       bool includeAnnotations = true);
+    QPixmap pageTile(int page, const QSize &fullSize, int tileX, int tileY,
+                     int tileSize, qreal dpr, bool includeAnnotations);
+    void drawTiledPage(QPainter &painter, int page, const QRect &target,
+                       const QRect &exposed, qreal dpr);
     bool updateErasePreview(const QPointF &start, const QPointF &end);
     void drawSearchResults(QPainter &painter, int page, const QRect &pageRect,
                            const PdfEditor::SearchResult &current);
@@ -272,6 +283,8 @@ private:
     QVector<QRect> m_pageRects;
     QSize m_documentSize;
     int m_currentPage = 0;
+    int m_visibleFirstPage = -1;
+    int m_visibleLastPage = -1;
     bool m_jumping = false;
     int m_pressedLinkPage = -1;
     QPoint m_linkPressPos;
@@ -282,10 +295,13 @@ private:
 
     QCache<quint64, QPixmap> m_cache;
     QCache<quint64, QPixmap> m_baseCache;
+    QCache<QString, QPixmap> m_tileCache;
     QSet<quint64> m_failedPageKeys;
     QSet<quint64> m_failedBaseKeys;
     QSet<quint64> m_pendingPageKeys;
     QSet<quint64> m_pendingBaseKeys;
+    QSet<QString> m_failedTileKeys;
+    QSet<QString> m_pendingTileKeys;
 
     // text tool
     bool m_textTool = false;

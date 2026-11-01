@@ -2,6 +2,7 @@
 #include <QHash>
 #include <QList>
 #include <QMainWindow>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <QTemporaryDir>
@@ -99,8 +100,7 @@ private:
     void placeImage(int page, const QRectF &box, const QImage &image);
     bool fillFormField(int page, const QPointF &point, PageView::FormField *field);
     bool commitFormField(int page, int widgetIndex, const QString &value);
-    bool refreshFormFieldOverlays(
-        const QVector<QVector<PdfEditor::FormField>> *prefetched = nullptr);
+    bool refreshFormFieldOverlays(int firstPage = -1, int lastPage = -1);
     void undo();
     void redo();
     void stepHistory(const QString &path);
@@ -160,5 +160,6 @@ private:
     QString m_displayName;
     QString m_password;
     int m_editCount = 0;
+    QSet<int> m_formFieldPagesLoaded;
     QHash<QString, QVector<QSizeF>> m_pageSizeCache;
 };

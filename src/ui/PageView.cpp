@@ -15,6 +15,7 @@
 #include <QKeyEvent>
 #include <QLineEdit>
 #include <QLineF>
+#include <QLoggingCategory>
 #include <QMenu>
 #include <QMetaObject>
 #include <QMouseEvent>
@@ -42,6 +43,8 @@
 #include <utility>
 
 namespace {
+Q_LOGGING_CATEGORY(lcPageRasterCache, "pdfapp.cache.pages")
+
 constexpr int kMargin = 12;
 constexpr int kSpacing = 12;
 constexpr int kLinkGridSize = 16;
@@ -50,6 +53,13 @@ constexpr int kZoomUpdateIntervalMs = 75;
 constexpr double kMinZoom = 0.1;
 constexpr double kMaxZoom = 4.0;
 constexpr int kMaxPendingPageRenders = 4;
+constexpr int kPageImageCacheKilobytes = 64 * 1024;
+constexpr int kBasePageImageCacheKilobytes = 16 * 1024;
+constexpr int kPageTileCacheKilobytes = 24 * 1024;
+constexpr int kSharedPageRasterCacheKilobytes = 64 * 1024;
+constexpr int kPageTileSize = 1024;
+constexpr int kPageTileThreshold = 4096;
+constexpr int kPageCachePrefetchRadius = 2;
 
 constexpr int kLoadingFrameSize = 64;
 constexpr int kLoadingDisplaySize = 256;
@@ -137,8 +147,9 @@ double segmentDistanceSquared(const QPointF &a, const QPointF &b,
 
 PageView::PageView(QWidget *parent)
     : QAbstractScrollArea(parent)
-    , m_cache(96 * 1024)
-    , m_baseCache(32 * 1024)
+    , m_cache(kPageImageCacheKilobytes)
+    , m_baseCache(kBasePageImageCacheKilobytes)
+    , m_tileCache(kPageTileCacheKilobytes)
 {
     m_renderPool.setMaxThreadCount(1);
     setFocusPolicy(Qt::StrongFocus);
@@ -278,8 +289,10 @@ void PageView::setRenderSource(const QString &path, const QString &password)
     m_renderSourcePath = path;
     m_renderPassword = password;
     invalidatePendingPageRenders();
+    m_tileCache.clear();
     m_failedPageKeys.clear();
     m_failedBaseKeys.clear();
+    m_failedTileKeys.clear();
     viewport()->update();
 }
 
@@ -288,8 +301,10 @@ void PageView::invalidatePageRenders(const QList<int> &changedPages)
     if (changedPages.isEmpty()) {
         m_cache.clear();
         m_baseCache.clear();
+        m_tileCache.clear();
         m_failedPageKeys.clear();
         m_failedBaseKeys.clear();
+        m_failedTileKeys.clear();
         invalidatePendingPageRenders();
         viewport()->update();
         return;
@@ -306,6 +321,14 @@ void PageView::invalidatePageRenders(const QList<int> &changedPages)
         if (changedPages.contains(int(key >> 40)))
             m_baseCache.remove(key);
     }
+    const QList<QString> tileKeys = m_tileCache.keys();
+    for (const QString &key : tileKeys) {
+        const int separator = key.indexOf(QLatin1Char(':'));
+        bool ok = false;
+        const int page = key.left(separator).toInt(&ok);
+        if (ok && changedPages.contains(page))
+            m_tileCache.remove(key);
+    }
     for (int page : changedPages) {
         for (auto it = m_failedPageKeys.begin(); it != m_failedPageKeys.end();) {
             if ((*it >> 40) == quint64(page))
@@ -316,6 +339,13 @@ void PageView::invalidatePageRenders(const QList<int> &changedPages)
         for (auto it = m_failedBaseKeys.begin(); it != m_failedBaseKeys.end();) {
             if ((*it >> 40) == quint64(page))
                 it = m_failedBaseKeys.erase(it);
+            else
+                ++it;
+        }
+        const QString pagePrefix = QString::number(page) + QLatin1Char(':');
+        for (auto it = m_failedTileKeys.begin(); it != m_failedTileKeys.end();) {
+            if ((*it).startsWith(pagePrefix))
+                it = m_failedTileKeys.erase(it);
             else
                 ++it;
         }
@@ -365,11 +395,15 @@ void PageView::onDocumentChanged()
 
     m_cache.clear();
     m_baseCache.clear();
+    m_tileCache.clear();
     m_failedPageKeys.clear();
     m_failedBaseKeys.clear();
+    m_failedTileKeys.clear();
     m_pageSizes.clear();
     m_pageLinkCaches.clear();
     m_searchIndex = -1;
+    m_visibleFirstPage = -1;
+    m_visibleLastPage = -1;
 
     if (m_document) {
         const int count = m_document->pageCount();
@@ -387,11 +421,7 @@ void PageView::onDocumentChanged()
 
 void PageView::invalidatePendingPageRenders()
 {
-    ++m_renderGeneration;
-    m_renderPool.clear();
-    m_pendingPageKeys.clear();
-    m_pendingBaseKeys.clear();
-    m_renderRequestsSaturated = false;
+    discardQueuedPageRenders();
 }
 
 void PageView::positionEmptyStateButton()
@@ -527,12 +557,14 @@ void PageView::recalculateLayout(bool keepPosition)
     positionEmptyStateButton();
     viewport()->update();
     updateCurrentPage();
+    trimPageImageCaches();
 }
 
 // navigation
 
 void PageView::updateCurrentPage()
 {
+    updateVisiblePageRange();
     if (m_pageRects.isEmpty())
         return;
 
@@ -543,8 +575,40 @@ void PageView::updateCurrentPage()
     const int page = qMax(0, int(nextPage - m_pageRects.cbegin()) - 1);
     if (page != m_currentPage) {
         m_currentPage = page;
+        discardQueuedPageRenders();
+        trimPageImageCaches();
         emit currentPageChanged(page);
     }
+}
+
+QPair<int, int> PageView::visiblePageRange() const
+{
+    if (m_pageRects.isEmpty())
+        return qMakePair(-1, -1);
+
+    const int top = verticalScrollBar()->value();
+    const int bottom = top + viewport()->height();
+    auto first = std::lower_bound(
+        m_pageRects.cbegin(), m_pageRects.cend(), top,
+        [](const QRect &rect, int y) { return rect.bottom() < y; });
+    if (first == m_pageRects.cend() || first->top() > bottom)
+        return qMakePair(-1, -1);
+
+    int lastPage = int(first - m_pageRects.cbegin());
+    for (auto page = first; page != m_pageRects.cend() && page->top() <= bottom; ++page)
+        lastPage = int(page - m_pageRects.cbegin());
+    return qMakePair(int(first - m_pageRects.cbegin()), lastPage);
+}
+
+void PageView::updateVisiblePageRange()
+{
+    const QPair<int, int> range = visiblePageRange();
+    if (range.first == m_visibleFirstPage && range.second == m_visibleLastPage)
+        return;
+
+    m_visibleFirstPage = range.first;
+    m_visibleLastPage = range.second;
+    emit visiblePageRangeChanged(range.first, range.second);
 }
 
 void PageView::jumpToPage(int page, const QPointF &location)
@@ -566,9 +630,200 @@ void PageView::jumpToPage(int page, const QPointF &location)
 
     if (page != m_currentPage) {
         m_currentPage = page;
+        discardQueuedPageRenders();
+        trimPageImageCaches();
         emit currentPageChanged(page);
     }
     viewport()->update();
+    updateVisiblePageRange();
+}
+
+void PageView::trimPageImageCaches()
+{
+    if (m_pageRects.isEmpty() || viewport()->size().isEmpty())
+        return;
+
+    const QPoint offset(horizontalScrollBar()->value(), verticalScrollBar()->value());
+    const int visibleTop = offset.y();
+    const int visibleBottom = visibleTop + viewport()->height();
+    const auto firstVisible = std::lower_bound(
+        m_pageRects.cbegin(), m_pageRects.cend(), visibleTop,
+        [](const QRect &rect, int y) { return rect.bottom() < y; });
+    if (firstVisible == m_pageRects.cend())
+        return;
+
+    const int first = int(firstVisible - m_pageRects.cbegin());
+    int last = first;
+    while (last + 1 < m_pageRects.size()
+           && m_pageRects.at(last + 1).top() <= visibleBottom) {
+        ++last;
+    }
+
+    const int keepFirst = qMax(0, first - kPageCachePrefetchRadius);
+    const int keepLast = qMin(m_pageRects.size() - 1, last + kPageCachePrefetchRadius);
+    int evicted = 0;
+    const auto evictDistantPages = [&](QCache<quint64, QPixmap> &cache) {
+        const QList<quint64> keys = cache.keys();
+        for (quint64 key : keys) {
+            const int page = int(key >> 40);
+            if (page < keepFirst || page > keepLast) {
+                cache.remove(key);
+                ++evicted;
+            }
+        }
+    };
+    evictDistantPages(m_cache);
+    evictDistantPages(m_baseCache);
+    const QList<QString> tileKeys = m_tileCache.keys();
+    for (const QString &key : tileKeys) {
+        const int separator = key.indexOf(QLatin1Char(':'));
+        bool ok = false;
+        const int page = key.left(separator).toInt(&ok);
+        if (ok && (page < keepFirst || page > keepLast)) {
+            m_tileCache.remove(key);
+            ++evicted;
+        }
+    }
+
+    for (auto it = m_failedPageKeys.begin(); it != m_failedPageKeys.end();) {
+        const int page = int(*it >> 40);
+        if (page < keepFirst || page > keepLast)
+            it = m_failedPageKeys.erase(it);
+        else
+            ++it;
+    }
+    for (auto it = m_failedBaseKeys.begin(); it != m_failedBaseKeys.end();) {
+        const int page = int(*it >> 40);
+        if (page < keepFirst || page > keepLast)
+            it = m_failedBaseKeys.erase(it);
+        else
+            ++it;
+    }
+    for (auto it = m_failedTileKeys.begin(); it != m_failedTileKeys.end();) {
+        const int separator = it->indexOf(QLatin1Char(':'));
+        bool ok = false;
+        const int page = it->left(separator).toInt(&ok);
+        if (ok && (page < keepFirst || page > keepLast))
+            it = m_failedTileKeys.erase(it);
+        else
+            ++it;
+    }
+
+    if (evicted > 0) {
+        qCDebug(lcPageRasterCache)
+            << "Evicted distant page rasters:" << evicted
+            << "visible pages:" << first + 1 << "-" << last + 1
+            << "retained range:" << keepFirst + 1 << "-" << keepLast + 1
+            << "cache bytes:"
+            << qint64(m_cache.totalCost() + m_baseCache.totalCost()
+                      + m_tileCache.totalCost()) * 1024;
+    }
+}
+
+void PageView::discardQueuedPageRenders()
+{
+    ++m_renderGeneration;
+    m_renderPool.clear();
+    m_pendingPageKeys.clear();
+    m_pendingBaseKeys.clear();
+    m_pendingTileKeys.clear();
+    m_renderRequestsSaturated = false;
+}
+
+void PageView::enforcePageRasterBudget()
+{
+    const auto totalCost = [this]() {
+        return m_cache.totalCost() + m_baseCache.totalCost()
+               + m_tileCache.totalCost();
+    };
+    const auto visibleRange = [this]() {
+        QPair<int, int> range(m_currentPage, m_currentPage);
+        if (m_pageRects.isEmpty() || viewport()->height() <= 0)
+            return range;
+        const int top = verticalScrollBar()->value();
+        const int bottom = top + viewport()->height();
+        const auto first = std::lower_bound(
+            m_pageRects.cbegin(), m_pageRects.cend(), top,
+            [](const QRect &rect, int y) { return rect.bottom() < y; });
+        if (first == m_pageRects.cend())
+            return range;
+        range.first = int(first - m_pageRects.cbegin());
+        range.second = range.first;
+        while (range.second + 1 < m_pageRects.size()
+               && m_pageRects.at(range.second + 1).top() <= bottom) {
+            ++range.second;
+        }
+        return range;
+    }();
+    const auto distanceFromVisible = [&visibleRange](int page) {
+        if (page < visibleRange.first)
+            return visibleRange.first - page;
+        if (page > visibleRange.second)
+            return page - visibleRange.second;
+        return 0;
+    };
+
+    int evicted = 0;
+    while (totalCost() > kSharedPageRasterCacheKilobytes) {
+        int farthestPage = -1;
+        int farthestDistance = -1;
+        const auto considerPage = [&](int page) {
+            const int distance = distanceFromVisible(page);
+            if (distance > farthestDistance) {
+                farthestDistance = distance;
+                farthestPage = page;
+            }
+        };
+        for (quint64 key : m_baseCache.keys())
+            considerPage(int(key >> 40));
+        for (quint64 key : m_cache.keys())
+            considerPage(int(key >> 40));
+        for (const QString &key : m_tileCache.keys()) {
+            const int separator = key.indexOf(QLatin1Char(':'));
+            bool ok = false;
+            const int page = key.left(separator).toInt(&ok);
+            if (ok)
+                considerPage(page);
+        }
+        if (farthestPage < 0)
+            break;
+
+        bool removed = false;
+        const auto removeOneForPage = [farthestPage](QCache<quint64, QPixmap> &cache) {
+            for (quint64 key : cache.keys()) {
+                if (int(key >> 40) == farthestPage) {
+                    cache.remove(key);
+                    return true;
+                }
+            }
+            return false;
+        };
+        removed = removeOneForPage(m_baseCache);
+        if (!removed)
+            removed = removeOneForPage(m_cache);
+        if (!removed) {
+            for (const QString &key : m_tileCache.keys()) {
+                const int separator = key.indexOf(QLatin1Char(':'));
+                bool ok = false;
+                const int page = key.left(separator).toInt(&ok);
+                if (ok && page == farthestPage) {
+                    m_tileCache.remove(key);
+                    removed = true;
+                    break;
+                }
+            }
+        }
+        if (!removed)
+            break;
+        ++evicted;
+    }
+
+    if (evicted > 0) {
+        qCDebug(lcPageRasterCache)
+            << "Shared raster budget evicted:" << evicted
+            << "cache bytes:" << qint64(totalCost()) * 1024
+            << "budget bytes:" << qint64(kSharedPageRasterCacheKilobytes) * 1024;
+    }
 }
 
 int PageView::pageAtViewportPoint(const QPoint &point) const
@@ -853,7 +1108,7 @@ QPixmap PageView::pageImage(int page, const QSize &size, qreal dpr,
 
     if (!pendingKeys.contains(key)
         && m_pendingPageKeys.size() + m_pendingBaseKeys.size()
-               < kMaxPendingPageRenders) {
+                   + m_pendingTileKeys.size() < kMaxPendingPageRenders) {
         pendingKeys.insert(key);
         const quint64 generation = m_renderGeneration;
         const QString sourcePath = m_renderSourcePath;
@@ -896,10 +1151,22 @@ QPixmap PageView::pageImage(int page, const QSize &size, qreal dpr,
                             failed.remove(key);
                             QPixmap pixmap = QPixmap::fromImage(image);
                             pixmap.setDevicePixelRatio(dpr);
+                            const qint64 bytes =
+                                qint64(pixmap.width()) * pixmap.height() * 4;
+                            const int costKilobytes = int(qBound<qint64>(
+                                qint64(1), (bytes + 1023) / 1024,
+                                qint64(std::numeric_limits<int>::max())));
                             targetCache.insert(
-                                key, new QPixmap(pixmap),
-                                pixmap.width() * pixmap.height() * 4 / 1024);
+                                key, new QPixmap(pixmap), costKilobytes);
+                            enforcePageRasterBudget();
+                            qCDebug(lcPageRasterCache)
+                                << "Raster cache bytes:"
+                                << qint64(m_cache.totalCost() + m_baseCache.totalCost()
+                                          + m_tileCache.totalCost()) * 1024
+                                << "images:" << m_cache.size() + m_baseCache.size()
+                                                   + m_tileCache.size();
                         }
+                        trimPageImageCaches();
 
                         if (page >= 0 && page < m_pageRects.size()) {
                             const QPoint offset(horizontalScrollBar()->value(),
@@ -937,6 +1204,140 @@ QPixmap PageView::pageImage(int page, const QSize &size, qreal dpr,
         }
     }
     return closestPreview;
+}
+
+QPixmap PageView::pageTile(int page, const QSize &fullSize, int tileX, int tileY,
+                           int tileSize, qreal dpr, bool includeAnnotations)
+{
+    const int pixelX = tileX * tileSize;
+    const int pixelY = tileY * tileSize;
+    const QSize tilePixels(qMin(tileSize, fullSize.width() - pixelX),
+                           qMin(tileSize, fullSize.height() - pixelY));
+    if (tilePixels.isEmpty() || page < 0 || page >= m_pageSizes.size())
+        return {};
+
+    const QString key = QStringLiteral("%1:%2:%3:%4:%5")
+                            .arg(page).arg(fullSize.width()).arg(fullSize.height())
+                            .arg(tileX).arg(tileY);
+    if (QPixmap *cached = m_tileCache.object(key))
+        return *cached;
+    if (m_failedTileKeys.contains(key))
+        return {};
+
+    if (!m_pendingTileKeys.contains(key)
+        && m_pendingPageKeys.size() + m_pendingBaseKeys.size()
+                   + m_pendingTileKeys.size() < kMaxPendingPageRenders) {
+        m_pendingTileKeys.insert(key);
+        const quint64 generation = m_renderGeneration;
+        const QString sourcePath = m_renderSourcePath;
+        const QString password = m_renderPassword;
+        const QSizeF pageSize = m_pageSizes.at(page);
+        const QRectF pageRegion(
+            pageSize.width() * pixelX / fullSize.width(),
+            pageSize.height() * pixelY / fullSize.height(),
+            pageSize.width() * tilePixels.width() / fullSize.width(),
+            pageSize.height() * tilePixels.height() / fullSize.height());
+
+        m_renderPool.start(QRunnable::create(
+            [this, page, key, generation, sourcePath, password, pageRegion,
+             tilePixels, dpr, includeAnnotations]() {
+                thread_local MuPdfRenderCache renderer;
+                QImage image;
+                QString error;
+                if (renderer.open(sourcePath, password, &error)) {
+                    image = renderer.renderRegion(page, pageRegion, tilePixels,
+                                                  includeAnnotations, &error);
+                    if (image.isNull() && error.isEmpty())
+                        error = QStringLiteral("PDF renderer returned an empty page tile.");
+                }
+                QMetaObject::invokeMethod(
+                    this,
+                    [this, page, key, generation, dpr, image = std::move(image),
+                     error = std::move(error)]() {
+                        if (generation != m_renderGeneration)
+                            return;
+                        m_pendingTileKeys.remove(key);
+                        if (image.isNull()) {
+                            m_failedTileKeys.insert(key);
+                            qWarning().noquote()
+                                << QStringLiteral("Could not render tile for PDF page %1: %2")
+                                       .arg(page + 1).arg(error);
+                        } else {
+                            QPixmap pixmap = QPixmap::fromImage(image);
+                            pixmap.setDevicePixelRatio(dpr);
+                            const qint64 bytes =
+                                qint64(pixmap.width()) * pixmap.height() * 4;
+                            const int costKilobytes = int(qBound<qint64>(
+                                qint64(1), (bytes + 1023) / 1024,
+                                qint64(std::numeric_limits<int>::max())));
+                            m_tileCache.insert(key, new QPixmap(pixmap), costKilobytes);
+                            enforcePageRasterBudget();
+                            qCDebug(lcPageRasterCache)
+                                << "Raster cache bytes:"
+                                << qint64(m_cache.totalCost() + m_baseCache.totalCost()
+                                          + m_tileCache.totalCost()) * 1024
+                                << "images:" << m_cache.size() + m_baseCache.size()
+                                                   + m_tileCache.size();
+                        }
+                        trimPageImageCaches();
+                        if (page >= 0 && page < m_pageRects.size()) {
+                            const QPoint offset(horizontalScrollBar()->value(),
+                                                verticalScrollBar()->value());
+                            viewport()->update(
+                                m_pageRects.at(page).translated(-offset));
+                        }
+                        if (m_renderRequestsSaturated) {
+                            m_renderRequestsSaturated = false;
+                            viewport()->update();
+                        }
+                    },
+                    Qt::QueuedConnection);
+            }), -qAbs(page - m_currentPage));
+    } else if (!m_pendingTileKeys.contains(key)) {
+        m_renderRequestsSaturated = true;
+    }
+
+    return {};
+}
+
+void PageView::drawTiledPage(QPainter &painter, int page, const QRect &target,
+                             const QRect &exposed, qreal dpr)
+{
+    if (page < 0 || page >= m_pageSizes.size() || dpr <= 0.0)
+        return;
+    const QSize fullSize(qMax(1, qRound(target.width() * dpr)),
+                         qMax(1, qRound(target.height() * dpr)));
+    const QRect visible = target.intersected(exposed);
+    if (visible.isEmpty())
+        return;
+
+    const int firstTileX = qMax(
+        0, int(qFloor((visible.left() - target.left()) * dpr / kPageTileSize)));
+    const int lastTileX = qMin(
+        (fullSize.width() - 1) / kPageTileSize,
+        int(qFloor((visible.right() - target.left()) * dpr / kPageTileSize)));
+    const int firstTileY = qMax(
+        0, int(qFloor((visible.top() - target.top()) * dpr / kPageTileSize)));
+    const int lastTileY = qMin(
+        (fullSize.height() - 1) / kPageTileSize,
+        int(qFloor((visible.bottom() - target.top()) * dpr / kPageTileSize)));
+
+    for (int tileY = firstTileY; tileY <= lastTileY; ++tileY) {
+        for (int tileX = firstTileX; tileX <= lastTileX; ++tileX) {
+            const QPixmap tile = pageTile(page, fullSize, tileX, tileY,
+                                          kPageTileSize, dpr, true);
+            if (tile.isNull())
+                continue;
+            const int pixelX = tileX * kPageTileSize;
+            const int pixelY = tileY * kPageTileSize;
+            const QRectF destination(
+                target.left() + pixelX / dpr,
+                target.top() + pixelY / dpr,
+                tile.width() / dpr,
+                tile.height() / dpr);
+            painter.drawPixmap(destination, tile, tile.rect());
+        }
+    }
 }
 
 void PageView::drawStroke(QPainter &painter, const Stroke &stroke, const QRect &pageRect)
@@ -1018,7 +1419,17 @@ void PageView::paintEvent(QPaintEvent *event)
 
         const QRect target = r.translated(-offset);
         painter.fillRect(target, Qt::white);
-        QPixmap renderedPage = pageImage(page, target.size(), dpr);
+        const QSize fullRasterSize(qMax(1, qRound(target.width() * dpr)),
+                                   qMax(1, qRound(target.height() * dpr)));
+        const bool tiledPage =
+            (fullRasterSize.width() > kPageTileThreshold
+             || fullRasterSize.height() > kPageTileThreshold)
+            && !(m_erasing && m_erasePage == page);
+        QPixmap renderedPage;
+        if (tiledPage)
+            drawTiledPage(painter, page, target, event->rect(), dpr);
+        else
+            renderedPage = pageImage(page, target.size(), dpr);
         const bool exactPageImage = !renderedPage.isNull()
                                     && qAbs(renderedPage.width() / dpr
                                             - target.width()) < 1.0

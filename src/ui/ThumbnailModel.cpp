@@ -8,16 +8,21 @@
 #include <QThreadPool>
 #include <QPainter>
 #include <QMimeData>
+#include <QLoggingCategory>
 #include <QTimer>
 
 namespace {
+Q_LOGGING_CATEGORY(lcThumbnailCache, "pdfapp.cache.thumbnails")
+
 constexpr int kMaxInFlight = 2;
 constexpr int kMaxQueuedRenders = 32;
+constexpr int kThumbnailCacheKilobytes = 12 * 1024;
+constexpr int kThumbnailPrefetchRadius = 4;
 }
 
 ThumbnailModel::ThumbnailModel(QObject *parent)
     : QAbstractListModel(parent)
-    , m_cache(300)
+    , m_cache(kThumbnailCacheKilobytes)
 {
     m_renderPool.setMaxThreadCount(1);
     m_renderPool.setThreadPriority(QThread::LowPriority);
@@ -76,6 +81,37 @@ void ThumbnailModel::invalidatePageRenders(const QList<int> &changedPages)
     }
 }
 
+void ThumbnailModel::setVisiblePageRange(int first, int last, int priorityPage)
+{
+    const int count = rowCount();
+    if (count <= 0 || first < 0 || last < first) {
+        m_visibleFirst = -1;
+        m_visibleLast = -1;
+        m_priorityPage = -1;
+        return;
+    }
+
+    m_visibleFirst = qBound(0, first, count - 1);
+    m_visibleLast = qBound(m_visibleFirst, last, count - 1);
+    m_priorityPage = qBound(m_visibleFirst, priorityPage, m_visibleLast);
+
+    const int keepFirst = qMax(0, m_visibleFirst - kThumbnailPrefetchRadius);
+    const int keepLast = qMin(count - 1, m_visibleLast + kThumbnailPrefetchRadius);
+    QQueue<int> retained;
+    while (!m_renderQueue.isEmpty()) {
+        const int page = m_renderQueue.dequeue();
+        if (page >= keepFirst && page <= keepLast) {
+            retained.enqueue(page);
+        } else {
+            m_queuedPages.remove(page);
+        }
+    }
+    m_renderQueue.swap(retained);
+
+    if (!m_renderQueue.isEmpty() && !m_renderTimer->isActive())
+        m_renderTimer->start();
+}
+
 void ThumbnailModel::invalidateRenders()
 {
     ++m_renderGeneration;
@@ -93,7 +129,18 @@ void ThumbnailModel::dispatchRenders()
         return;
 
     while (m_inFlight < kMaxInFlight && !m_renderQueue.isEmpty()) {
-        const int page = m_renderQueue.takeLast();
+        int nextIndex = 0;
+        if (m_visibleFirst >= 0) {
+            auto score = [this](int page) {
+                const bool visible = page >= m_visibleFirst && page <= m_visibleLast;
+                return qMakePair(visible ? 0 : 1, qAbs(page - m_priorityPage));
+            };
+            for (int i = 1; i < m_renderQueue.size(); ++i) {
+                if (score(m_renderQueue.at(i)) < score(m_renderQueue.at(nextIndex)))
+                    nextIndex = i;
+            }
+        }
+        const int page = m_renderQueue.takeAt(nextIndex);
         if (m_cache.object(page)) {
             m_queuedPages.remove(page);
             continue;
@@ -151,15 +198,25 @@ void ThumbnailModel::dispatchRenders()
                             m_cache.insert(
                                 page, new QPixmap(thumbnail.isNull()
                                                       ? QPixmap()
-                                                      : QPixmap::fromImage(thumbnail)));
+                                                      : QPixmap::fromImage(thumbnail)),
+                                qMax(1, int((qint64(thumbnail.width())
+                                             * thumbnail.height() * 4 + 1023)
+                                            / 1024)));
+                            qCDebug(lcThumbnailCache)
+                                << "Thumbnail cache bytes:"
+                                << qint64(m_cache.totalCost()) * 1024
+                                << "images:" << m_cache.size();
                             emit dataChanged(index(page), index(page),
                                              { Qt::DecorationRole });
                         }
                         dispatchRenders();
                         if (m_renderQueueSaturated && rowCount() > 0) {
                             m_renderQueueSaturated = false;
-                            emit dataChanged(index(0), index(rowCount() - 1),
-                                             { Qt::DecorationRole });
+                            const int first = m_visibleFirst >= 0 ? m_visibleFirst : 0;
+                            const int last = m_visibleLast >= first
+                                                 ? m_visibleLast : rowCount() - 1;
+                            emit dataChanged(index(first), index(last),
+                                             {Qt::DecorationRole});
                         }
                     },
                     Qt::QueuedConnection);

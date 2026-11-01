@@ -3,6 +3,7 @@
 #include <QByteArray>
 #include <QDateTime>
 #include <QImage>
+#include <QRectF>
 #include <QSize>
 #include <QSizeF>
 #include <QString>
@@ -23,6 +24,8 @@ public:
     bool open(const QString &path, const QString &password, QString *error);
     QSizeF pagePointSize(int page, QString *error);
     QImage render(int page, const QSize &size, bool annotations, QString *error);
+    QImage renderRegion(int page, const QRectF &pageRegion, const QSize &size,
+                       bool annotations, QString *error);
 
 private:
     void closeDocument();
