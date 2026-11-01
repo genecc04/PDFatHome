@@ -75,7 +75,7 @@ private:
     bool saveAs();
     void goToPage(int page);
     bool showFile(const QString &path, int page, bool reportErrors = true,
-                  bool preserveRasterPreviews = false);
+                  bool preserveRasterPreviews = false, bool forceReload = false);
     void clearPageRenderCaches();
     void addRecentFile(const QString &path);
     void setDocumentPassword();

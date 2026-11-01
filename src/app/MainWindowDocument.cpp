@@ -323,13 +323,13 @@ void MainWindow::goToPage(int page)
 }
 
 bool MainWindow::showFile(const QString &path, int page, bool reportErrors,
-                          bool preserveRasterPreviews)
+                          bool preserveRasterPreviews, bool forceReload)
 {
     if (!preserveRasterPreviews)
         clearPageRenderCaches();
     std::unique_ptr<PdfEditor> replacement;
     PdfEditor *document = m_editor.get();
-    if (!document || document->filePath() != path) {
+    if (forceReload || !document || document->filePath() != path) {
         replacement = std::make_unique<PdfEditor>();
         if (!replacement->open(path, m_password)) {
             const QString error = replacement->lastError();

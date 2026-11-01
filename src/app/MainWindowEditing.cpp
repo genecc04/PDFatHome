@@ -542,7 +542,7 @@ void MainWindow::stepHistory(const QString &path)
     EditOperationGuard operation(this);
 
     const int page = m_view->currentPage();
-    if (!showFile(path, page))
+    if (!showFile(path, page, true, false, true))
         return;
 
     refreshFormFieldOverlays();
