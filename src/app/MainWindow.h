@@ -65,12 +65,13 @@ private:
 
     // file and viewing
     void openFile();
-    void loadDocument(const QString &path);
+    void loadDocument(const QString &path, const QString &password = QString(),
+                      int page = 0);
     void startDocumentLoad(const QString &path, const QString &password,
-                           bool firstAttempt, const QString &workingPath);
+                           bool firstAttempt, const QString &workingPath, int page);
     void finishDocumentLoad(const QString &path, const QString &password,
                             bool firstAttempt, const QString &workingPath,
-                            const std::shared_ptr<DocumentLoadResult> &result);
+                            const std::shared_ptr<DocumentLoadResult> &result, int page);
     bool save();
     bool saveAs();
     void optimizePdf();

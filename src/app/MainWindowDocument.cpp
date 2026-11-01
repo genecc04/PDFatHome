@@ -140,7 +140,7 @@ void MainWindow::openPath(const QString &path)
     loadDocument(path);
 }
 
-void MainWindow::loadDocument(const QString &path)
+void MainWindow::loadDocument(const QString &path, const QString &password, int page)
 {
     if (m_documentLoadPending)
         return;
@@ -153,14 +153,14 @@ void MainWindow::loadDocument(const QString &path)
     const QString workingPath = m_tempDir.isValid()
         ? m_tempDir.filePath(QString("state-%1.pdf").arg(++m_editCount))
         : QString();
-    startDocumentLoad(path, QString(), true, workingPath);
+    startDocumentLoad(path, password, true, workingPath, page);
 }
 
 void MainWindow::startDocumentLoad(const QString &path, const QString &password,
-                                   bool firstAttempt, const QString &workingPath)
+                                   bool firstAttempt, const QString &workingPath, int page)
 {
     m_documentLoadPool.start(QRunnable::create(
-        [this, path, password, firstAttempt, workingPath]() {
+        [this, path, password, firstAttempt, workingPath, page]() {
             auto result = std::make_shared<DocumentLoadResult>();
             const auto stopIfClosing = [this, &result, &workingPath]() {
                 if (!m_closing)
@@ -206,8 +206,9 @@ void MainWindow::startDocumentLoad(const QString &path, const QString &password,
 
             QMetaObject::invokeMethod(
                 this,
-                [this, path, password, firstAttempt, workingPath, result]() {
-                    finishDocumentLoad(path, password, firstAttempt, workingPath, result);
+                [this, path, password, firstAttempt, workingPath, result, page]() {
+                    finishDocumentLoad(path, password, firstAttempt, workingPath, result,
+                                       page);
                 },
                 Qt::QueuedConnection);
         }));
@@ -215,7 +216,8 @@ void MainWindow::startDocumentLoad(const QString &path, const QString &password,
 
 void MainWindow::finishDocumentLoad(const QString &path, const QString &password,
                                     bool firstAttempt, const QString &workingPath,
-                                    const std::shared_ptr<DocumentLoadResult> &result)
+                                    const std::shared_ptr<DocumentLoadResult> &result,
+                                    int page)
 {
     auto endLoading = [this]() {
         m_documentLoadPending = false;
@@ -237,7 +239,7 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
         if (ok) {
             setBusyCursor(true);
             m_view->setLoading(true);
-            startDocumentLoad(path, entered, false, workingPath);
+            startDocumentLoad(path, entered, false, workingPath, page);
         } else {
             endLoading();
         }
@@ -257,7 +259,7 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
     if (!result->pageSizes.isEmpty())
         m_pageSizeCache.insert(working, result->pageSizes);
     m_view->setPageSizeHint(result->pageSizes);
-    const bool shown = showFile(working, 0, false);
+    const bool shown = showFile(working, page, false);
     m_view->setPageSizeHint(QVector<QSizeF>());
     if (!shown) {
         m_editor.swap(previousEditor);
@@ -511,6 +513,8 @@ bool MainWindow::saveAs()
         return false;
     }
 
+    const int page = m_view->currentPage();
+    const bool passwordChanged = m_passwordChange != PasswordChange::None;
     EditOperationGuard operation(this);
     PdfEditor saver;
     if (!saver.open(m_history.current(), m_password)
@@ -519,12 +523,26 @@ bool MainWindow::saveAs()
         return false;
     }
 
-    m_history.markSaved();
+    if (m_passwordChange == PasswordChange::Set)
+        m_password = m_newPassword;
+    else if (m_passwordChange == PasswordChange::Remove)
+        m_password.clear();
     m_passwordChange = PasswordChange::None;
     m_newPassword.clear();
+
+    m_currentPath = QFileInfo(dest).absoluteFilePath();
+    m_displayName = QFileInfo(dest).fileName();
+    addRecentFile(m_currentPath);
+    if (passwordChanged) {
+        removeSnapshots(m_history.states());
+        openWorkingCopy(m_currentPath, page);
+    } else {
+        m_history.markSaved();
+    }
+
     updateActions();
     updateTitle();
-    statusBar()->showMessage("Saved " + QFileInfo(dest).fileName(), 4000);
+    statusBar()->showMessage("Saved " + m_displayName, 4000);
     return true;
 }
 
@@ -600,6 +618,11 @@ void MainWindow::applyRedactions()
     }
 
     const QVector<PdfEditor::RedactionArea> areas = m_view->redactionAreas();
+    const int page = m_view->currentPage();
+    const QString outputPassword =
+        m_passwordChange == PasswordChange::Set
+            ? m_newPassword
+            : (m_passwordChange == PasswordChange::Remove ? QString() : m_password);
     EditOperationGuard operation(this);
     PdfEditor redactor;
     if (!redactor.open(m_history.current(), m_password)
@@ -612,8 +635,9 @@ void MainWindow::applyRedactions()
     m_redactAction->setChecked(false);
     statusBar()->showMessage(
         "Saved redacted copy: " + QFileInfo(dest).fileName()
-            + ". The original PDF was not changed; inspect the copy before sharing.",
+            + ". Opening it for inspection; the original PDF was not changed.",
         10000);
+    loadDocument(QFileInfo(dest).absoluteFilePath(), outputPassword, page);
 }
 
 bool MainWindow::save()
