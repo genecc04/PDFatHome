@@ -93,7 +93,8 @@ public:
     QSizeF pagePointSize(int pageIndex);
     QVector<QSizeF> pageSizes();
     QVector<Link> linksOnPage(int pageIndex);
-    QVector<SearchResult> search(const QString &text);
+    QVector<SearchResult> search(const QString &text,
+                                 const std::function<bool()> &isCancelled = {});
     QVector<Bookmark> bookmarks();
     TextSelection selectText(int pageIndex, const QPointF &start,
                              const QPointF &end, bool snapToWords = false);

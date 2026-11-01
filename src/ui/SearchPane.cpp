@@ -46,9 +46,9 @@ SearchPane::SearchPane(QWidget *parent)
             });
 }
 
-void SearchPane::setDocument(PdfEditor *document)
+void SearchPane::setDocument(PdfEditor *document, const QString &password)
 {
-    m_model->setDocument(document);
+    m_model->setDocument(document ? document->filePath() : QString(), password);
 }
 
 void SearchPane::focusSearchBox()

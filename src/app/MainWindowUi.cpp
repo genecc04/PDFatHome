@@ -213,7 +213,7 @@ void MainWindow::setupThumbnailPane()
 void MainWindow::setupSearchPane()
 {
     m_search = new SearchPane(this);
-    m_search->setDocument(m_document);
+    m_search->setDocument(m_document, m_password);
     m_view->setSearchModel(m_search->searchModel());
 
     m_searchDock = new QDockWidget("Search", this);

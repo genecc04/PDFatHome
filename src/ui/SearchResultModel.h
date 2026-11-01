@@ -2,7 +2,11 @@
 
 #include <QAbstractListModel>
 #include <QHash>
+#include <QThreadPool>
 #include <QVector>
+
+#include <atomic>
+#include <memory>
 
 #include "PdfEditor.h"
 
@@ -11,8 +15,9 @@ class SearchResultModel : public QAbstractListModel
     Q_OBJECT
 public:
     explicit SearchResultModel(QObject *parent = nullptr);
+    ~SearchResultModel() override;
 
-    void setDocument(PdfEditor *document);
+    void setDocument(const QString &path, const QString &password);
     void setSearchString(const QString &text);
     QString searchString() const { return m_searchString; }
     PdfEditor::SearchResult resultAtIndex(int index) const;
@@ -25,7 +30,11 @@ signals:
     void searchFailed(const QString &error);
 
 private:
-    PdfEditor *m_document = nullptr;
+    QThreadPool m_searchPool;
+    std::shared_ptr<std::atomic_bool> m_searchCancellation;
+    quint64 m_searchGeneration = 0;
+    QString m_documentPath;
+    QString m_password;
     QString m_searchString;
     QVector<PdfEditor::SearchResult> m_results;
     QHash<int, QVector<PdfEditor::SearchResult>> m_resultsByPage;

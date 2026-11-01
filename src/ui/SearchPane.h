@@ -1,5 +1,6 @@
 #pragma once
 #include <QPointF>
+#include <QString>
 #include <QWidget>
 
 class QLineEdit;
@@ -13,7 +14,7 @@ class SearchPane : public QWidget
 public:
     explicit SearchPane(QWidget *parent = nullptr);
 
-    void setDocument(PdfEditor *document);
+    void setDocument(PdfEditor *document, const QString &password);
     SearchResultModel *searchModel() const { return m_model; }
     void focusSearchBox();
 

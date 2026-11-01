@@ -224,7 +224,7 @@ bool MainWindow::reopenEditor(const QString &path)
         if (m_thumbnails)
             m_thumbnails->setDocument(nullptr);
         if (m_search)
-            m_search->setDocument(nullptr);
+            m_search->setDocument(nullptr, m_password);
         if (m_bookmarks)
             m_bookmarks->setDocument(nullptr);
         m_document = nullptr;
@@ -239,7 +239,7 @@ bool MainWindow::reopenEditor(const QString &path)
     if (m_thumbnails)
         m_thumbnails->setDocument(m_document);
     if (m_search)
-        m_search->setDocument(m_document);
+        m_search->setDocument(m_document, m_password);
     if (m_bookmarks)
         m_bookmarks->setDocument(m_document);
     editor.reset();

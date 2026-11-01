@@ -527,7 +527,8 @@ QVector<PdfEditor::Link> PdfEditor::linksOnPage(int pageIndex)
     return links;
 }
 
-QVector<PdfEditor::SearchResult> PdfEditor::search(const QString &text)
+QVector<PdfEditor::SearchResult> PdfEditor::search(
+    const QString &text, const std::function<bool()> &isCancelled)
 {
     QVector<SearchResult> results;
     m_error.clear();
@@ -546,6 +547,9 @@ QVector<PdfEditor::SearchResult> PdfEditor::search(const QString &text)
 
     fz_var(results);
     for (int pageIndex = 0; pageIndex < count; ++pageIndex) {
+        if (isCancelled && isCancelled())
+            return {};
+
         fz_page *page = nullptr;
         fz_stext_page *textPage = nullptr;
         char *fullText = nullptr;

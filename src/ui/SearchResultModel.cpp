@@ -1,32 +1,91 @@
 #include "SearchResultModel.h"
 
+#include <QMetaObject>
+#include <QRunnable>
+
+#include <utility>
+
 SearchResultModel::SearchResultModel(QObject *parent)
     : QAbstractListModel(parent)
 {
+    m_searchPool.setMaxThreadCount(1);
 }
 
-void SearchResultModel::setDocument(PdfEditor *document)
+SearchResultModel::~SearchResultModel()
 {
-    m_document = document;
+    if (m_searchCancellation)
+        m_searchCancellation->store(true);
+    m_searchPool.clear();
+    m_searchPool.waitForDone();
+}
+
+void SearchResultModel::setDocument(const QString &path, const QString &password)
+{
+    m_documentPath = path;
+    m_password = password;
     setSearchString(m_searchString);
 }
 
 void SearchResultModel::setSearchString(const QString &text)
 {
+    ++m_searchGeneration;
+    if (m_searchCancellation)
+        m_searchCancellation->store(true);
+    m_searchPool.clear();
+
     beginResetModel();
     m_searchString = text.trimmed();
-    QString error;
     m_results.clear();
     m_resultsByPage.clear();
-    if (m_document && !m_searchString.isEmpty()) {
-        m_results = m_document->search(m_searchString);
-        error = m_document->lastError();
-        for (const PdfEditor::SearchResult &result : m_results)
-            m_resultsByPage[result.page].append(result);
-    }
     endResetModel();
-    if (!error.isEmpty())
-        emit searchFailed(error);
+
+    if (m_documentPath.isEmpty() || m_searchString.isEmpty())
+        return;
+
+    const quint64 generation = m_searchGeneration;
+    const QString query = m_searchString;
+    const QString path = m_documentPath;
+    const QString password = m_password;
+    auto cancellation = std::make_shared<std::atomic_bool>(false);
+    m_searchCancellation = cancellation;
+
+    m_searchPool.start(QRunnable::create(
+        [this, generation, query, path, password, cancellation]() {
+            PdfEditor editor;
+            QString error;
+            QVector<PdfEditor::SearchResult> results;
+            if (!editor.open(path, password)) {
+                error = editor.lastError();
+            } else {
+                results = editor.search(query, [cancellation]() {
+                    return cancellation->load();
+                });
+                if (!cancellation->load())
+                    error = editor.lastError();
+            }
+
+            if (cancellation->load())
+                return;
+
+            QMetaObject::invokeMethod(
+                this,
+                [this, generation, results = std::move(results),
+                 error = std::move(error)]() {
+                    if (generation != m_searchGeneration)
+                        return;
+
+                    beginResetModel();
+                    m_results = std::move(results);
+                    m_resultsByPage.clear();
+                    for (const PdfEditor::SearchResult &result : m_results)
+                        m_resultsByPage[result.page].append(result);
+                    endResetModel();
+
+                    if (!error.isEmpty())
+                        emit searchFailed(error);
+                },
+                Qt::QueuedConnection);
+        }));
 }
 
 PdfEditor::SearchResult SearchResultModel::resultAtIndex(int index) const

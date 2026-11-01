@@ -262,14 +262,14 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
     if (!shown) {
         m_editor.swap(previousEditor);
         m_document = m_editor.get();
+        m_password = previousPassword;
         m_formFieldPagesLoaded.clear();
         m_formFieldPagesFailed.clear();
         m_view->clearFormFieldOverlays();
         m_view->setDocument(m_document);
         m_thumbnails->setDocument(m_document);
-        m_search->setDocument(m_document);
+        m_search->setDocument(m_document, m_password);
         m_bookmarks->setDocument(m_document);
-        m_password = previousPassword;
         if (!previousState.isEmpty() && !showFile(previousState, previousPage, false)) {
             QMessageBox::warning(
                 this, "Open failed",
@@ -376,7 +376,7 @@ bool MainWindow::showFile(const QString &path, int page, bool reportErrors,
     m_view->setDocument(m_document, preserveRasterPreviews);
     m_view->setPageSizeHint(QVector<QSizeF>());
     m_thumbnails->setDocument(m_document);
-    m_search->setDocument(m_document);
+    m_search->setDocument(m_document, m_password);
     m_bookmarks->setDocument(m_document);
     replacement.reset();
     removeDeferredSnapshots();
@@ -562,7 +562,7 @@ bool MainWindow::save()
 
     m_view->setDocument(nullptr);
     m_thumbnails->setDocument(nullptr);
-    m_search->setDocument(nullptr);
+    m_search->setDocument(nullptr, m_password);
     m_bookmarks->setDocument(nullptr);
     m_document = nullptr;
     m_editor.reset();
