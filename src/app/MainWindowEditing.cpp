@@ -277,17 +277,17 @@ void MainWindow::placeText(int page, const QRectF &box, const QString &text,
         updateActions();
         return;
     }
-    refreshAfterPageEdit({ page }, page);
+    if (refreshAfterPageEdit({ page }, page))
+        m_view->preserveTextAnnotationChange(page, {}, box, text, style);
 }
 
 void MainWindow::updateTextAnnotation(int page, int annotationId,
-                                      const QString &oldText, const QString &newText)
+                                      const QString &oldText, const QString &newText,
+                                      const PageView::TextStyle &style)
 {
     if (!m_editor)
         return;
 
-    if (newText == oldText)
-        return;
     if (newText.trimmed().isEmpty()) {
         QMessageBox::warning(this, "Edit added text",
                              "Text cannot be empty. Use Delete added text to remove it.");
@@ -296,13 +296,19 @@ void MainWindow::updateTextAnnotation(int page, int annotationId,
     }
 
     EditOperationGuard operation(this);
-    if (!m_editor->updateTextAnnotation(page, annotationId, oldText, newText)) {
+    if (!m_editor->updateTextAnnotation(page, annotationId, oldText, newText,
+                                        annotationFontName(style), style.sizePoints,
+                                        style.color.redF(), style.color.greenF(),
+                                        style.color.blueF())) {
         QMessageBox::warning(this, "Edit added text", m_editor->lastError());
         reopenEditor(m_history.current());
         updateActions();
         return;
     }
-    refreshAfterPageEdit({ page }, page);
+    if (refreshAfterPageEdit({ page }, page))
+        m_view->preserveTextAnnotationChange(
+            page, m_view->selectedTextAnnotationBounds(),
+            m_view->selectedTextAnnotationBounds(), newText, style);
 }
 
 void MainWindow::deleteTextAnnotation(int page, int annotationId, const QString &text)
@@ -322,7 +328,10 @@ void MainWindow::deleteTextAnnotation(int page, int annotationId, const QString 
 }
 
 void MainWindow::updateTextAnnotationBounds(int page, int annotationId,
-                                            const QString &text, const QRectF &bounds)
+                                            const QString &text,
+                                            const QRectF &oldBounds,
+                                            const QRectF &bounds,
+                                            const PageView::TextStyle &style)
 {
     if (!m_editor)
         return;
@@ -334,7 +343,8 @@ void MainWindow::updateTextAnnotationBounds(int page, int annotationId,
         updateActions();
         return;
     }
-    refreshAfterPageEdit({ page }, page);
+    if (refreshAfterPageEdit({ page }, page))
+        m_view->preserveTextAnnotationChange(page, oldBounds, bounds, text, style);
 }
 
 void MainWindow::addImage()
@@ -492,8 +502,9 @@ void MainWindow::placeStrokes(const QVector<PageView::Stroke> &strokes)
         if (!changedPages.contains(stroke.page))
             changedPages.append(stroke.page);
     }
-    if (refreshAfterPageEdit(changedPages, strokes.last().page))
+    if (refreshAfterPageEdit(changedPages, strokes.last().page)) {
         statusBar()->showMessage(QString("Added %1 stroke(s)").arg(strokes.size()), 3000);
+    }
 }
 
 void MainWindow::eraseInk(int page, const QVector<QPointF> &path, double radius)
@@ -514,9 +525,10 @@ void MainWindow::eraseInk(int page, const QVector<QPointF> &path, double radius)
         return;
     }
 
-    if (refreshAfterPageEdit({ page }, page))
+    if (refreshAfterPageEdit({ page }, page)) {
         statusBar()->showMessage(
             QString("Erased %1 drawing stroke(s)").arg(removed), 3000);
+    }
 }
 
 void MainWindow::undo()

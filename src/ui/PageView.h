@@ -85,6 +85,7 @@ public:
 
     int currentPage() const { return m_currentPage; }
     bool hasSelectedTextAnnotation() const { return m_selectedTextAnnotationPage >= 0; }
+    QRectF selectedTextAnnotationBounds() const { return m_selectedTextAnnotationBounds; }
     bool hasActiveImagePlacement() const { return m_imageAwaiting || m_imageActive; }
     bool hasPositionedImage() const { return m_imageActive; }
     void jumpToPage(int page, const QPointF &location = QPointF());
@@ -123,6 +124,11 @@ public:
     void beginImagePlacement(const QImage &image);
 
     void commitPendingEdits();
+    void preserveCommittedStrokes(const QVector<PageView::Stroke> &strokes);
+    void preserveErasedStrokes(int page, const QVector<PageView::Stroke> &strokes);
+    void preserveTextAnnotationChange(int page, const QRectF &oldBounds,
+                                      const QRectF &newBounds, const QString &text,
+                                      const PageView::TextStyle &style);
 
     bool hasTextSelection() const { return !m_selection.isEmpty(); }
     void copySelection();
@@ -140,11 +146,14 @@ signals:
     void pendingStrokesChanged();
     void pendingChangesChanged();
     void textAnnotationEditRequested(int page, int annotationId, const QString &text);
+    void textAnnotationEditingStyleChanged(const PageView::TextStyle &style);
     void textAnnotationEdited(int page, int annotationId,
-                              const QString &oldText, const QString &newText);
+                              const QString &oldText, const QString &newText,
+                              const PageView::TextStyle &style);
     void textAnnotationDeleteRequested(int page, int annotationId, const QString &text);
     void textAnnotationBoundsChanged(int page, int annotationId, const QString &text,
-                                     const QRectF &bounds);
+                                     const QRectF &oldBounds, const QRectF &newBounds,
+                                     const PageView::TextStyle &style);
     void textAnnotationSelectionChanged(bool selected);
     void imagePlaced(int page, const QRectF &boxPoints, const QImage &image);
     void imagePlacementStateChanged(bool active, bool positioned);
@@ -174,6 +183,14 @@ private:
         Stroke stroke;
         QRectF bounds;
         bool erased = false;
+    };
+
+    struct TextAnnotationPreview {
+        int page = -1;
+        QRectF oldBounds;
+        QRectF newBounds;
+        QString text;
+        TextStyle style;
     };
 
     struct SelectionPart {
@@ -233,6 +250,7 @@ private:
                            const PdfEditor::SearchResult &current);
     void drawFormFieldOverlays(QPainter &painter, int page, const QRect &pageRect);
     void drawStroke(QPainter &painter, const Stroke &stroke, const QRect &pageRect);
+    void finishPendingRasterPreview(int page, const QSize &tilePageSize = {});
 
     void startEditor(int page, const QRectF &boxPoints);
     void startAnnotationEditor(int page, int annotationId, const QRectF &boxPoints,
@@ -327,6 +345,7 @@ private:
     bool m_editingTextAnnotation = false;
     int m_editingTextAnnotationId = 0;
     QString m_editingTextAnnotationOriginal;
+    bool m_editingTextAnnotationStyleChanged = false;
 
     // draw tool
     bool m_drawTool = false;
@@ -337,6 +356,10 @@ private:
     QPoint m_eraserCursorPos;
     QVector<QPointF> m_erasePoints;
     QVector<ErasePreviewStroke> m_erasePreviewStrokes;
+    QVector<Stroke> m_pendingCommittedStrokes;
+    int m_pendingErasedPage = -1;
+    QVector<Stroke> m_pendingErasedStrokes;
+    TextAnnotationPreview m_pendingTextAnnotationPreview;
     DrawStyle m_drawStyle;
     std::function<bool(int, QVector<Stroke> *)> m_inkStrokeHandler;
     Stroke m_activeStroke;

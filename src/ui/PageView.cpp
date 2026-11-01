@@ -7,6 +7,7 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QContextMenuEvent>
+#include <QCursor>
 #include <QDebug>
 #include <QEventLoop>
 #include <QFocusEvent>
@@ -243,6 +244,10 @@ void PageView::setLoading(bool loading)
         m_erasing = false;
         m_erasePoints.clear();
         m_erasePreviewStrokes.clear();
+        m_pendingCommittedStrokes.clear();
+        m_pendingErasedPage = -1;
+        m_pendingErasedStrokes.clear();
+        m_pendingTextAnnotationPreview = TextAnnotationPreview();
         m_imageDrag = ImageDrag::None;
         m_imageCropDragging = false;
         m_movingTextAnnotation = false;
@@ -337,27 +342,21 @@ void PageView::invalidatePageRenders(const QList<int> &changedPages)
     invalidatePendingPageRenders();
     const QList<quint64> keys = m_cache.keys();
     for (quint64 key : keys) {
-        if (changedPages.contains(int(key >> 40))) {
-            m_cache.remove(key);
-            m_stalePageKeys.remove(key);
-        }
+        if (changedPages.contains(int(key >> 40)))
+            m_stalePageKeys.insert(key);
     }
     const QList<quint64> baseKeys = m_baseCache.keys();
     for (quint64 key : baseKeys) {
-        if (changedPages.contains(int(key >> 40))) {
-            m_baseCache.remove(key);
-            m_staleBaseKeys.remove(key);
-        }
+        if (changedPages.contains(int(key >> 40)))
+            m_staleBaseKeys.insert(key);
     }
     const QList<QString> tileKeys = m_tileCache.keys();
     for (const QString &key : tileKeys) {
         const int separator = key.indexOf(QLatin1Char(':'));
         bool ok = false;
         const int page = key.left(separator).toInt(&ok);
-        if (ok && changedPages.contains(page)) {
-            m_tileCache.remove(key);
-            m_staleTileKeys.remove(key);
-        }
+        if (ok && changedPages.contains(page))
+            m_staleTileKeys.insert(key);
     }
     for (int page : changedPages) {
         for (auto it = m_failedPageKeys.begin(); it != m_failedPageKeys.end();) {
@@ -425,6 +424,10 @@ void PageView::onDocumentChanged(bool preserveRasterPreviews)
     m_erasePage = -1;
     m_erasePoints.clear();
     m_erasePreviewStrokes.clear();
+    m_pendingCommittedStrokes.clear();
+    m_pendingErasedPage = -1;
+    m_pendingErasedStrokes.clear();
+    m_pendingTextAnnotationPreview = TextAnnotationPreview();
 
     const bool hadStrokes = !m_strokes.isEmpty();
     m_strokes.clear();
@@ -464,6 +467,54 @@ void PageView::onDocumentChanged(bool preserveRasterPreviews)
         }
     }
     recalculateLayout(false);
+}
+
+void PageView::finishPendingRasterPreview(int page, const QSize &tilePageSize)
+{
+    if (!tilePageSize.isEmpty()) {
+        if (page < 0 || page >= m_pageRects.size())
+            return;
+        const QPoint offset(horizontalScrollBar()->value(), verticalScrollBar()->value());
+        const QRect target = m_pageRects.at(page).translated(-offset);
+        const QRect visible = target.intersected(viewport()->rect());
+        if (visible.isEmpty())
+            return;
+        const qreal dpr = devicePixelRatioF();
+        const int firstTileX = qMax(
+            0, int(qFloor((visible.left() - target.left()) * dpr / kPageTileSize)));
+        const int lastTileX = qMin(
+            (tilePageSize.width() - 1) / kPageTileSize,
+            int(qFloor((visible.right() - target.left()) * dpr / kPageTileSize)));
+        const int firstTileY = qMax(
+            0, int(qFloor((visible.top() - target.top()) * dpr / kPageTileSize)));
+        const int lastTileY = qMin(
+            (tilePageSize.height() - 1) / kPageTileSize,
+            int(qFloor((visible.bottom() - target.top()) * dpr / kPageTileSize)));
+        for (int tileY = firstTileY; tileY <= lastTileY; ++tileY) {
+            for (int tileX = firstTileX; tileX <= lastTileX; ++tileX) {
+                const QString key = QStringLiteral("%1:%2:%3:%4:%5")
+                                        .arg(page).arg(tilePageSize.width())
+                                        .arg(tilePageSize.height()).arg(tileX).arg(tileY);
+                if (!m_tileCache.contains(key) || m_staleTileKeys.contains(key))
+                    return;
+            }
+        }
+    }
+
+    m_pendingCommittedStrokes.erase(
+        std::remove_if(m_pendingCommittedStrokes.begin(), m_pendingCommittedStrokes.end(),
+                       [page](const Stroke &stroke) { return stroke.page == page; }),
+        m_pendingCommittedStrokes.end());
+    if (m_pendingErasedPage == page) {
+        m_pendingErasedPage = -1;
+        m_pendingErasedStrokes.clear();
+    }
+    if (m_pendingTextAnnotationPreview.page == page)
+        m_pendingTextAnnotationPreview = TextAnnotationPreview();
+    if (page >= 0 && page < m_pageRects.size()) {
+        const QPoint offset(horizontalScrollBar()->value(), verticalScrollBar()->value());
+        viewport()->update(m_pageRects.at(page).translated(-offset));
+    }
 }
 
 void PageView::invalidatePendingPageRenders()
@@ -1238,6 +1289,8 @@ QPixmap PageView::pageImage(int page, const QSize &size, qreal dpr,
                                           + m_tileCache.totalCost()) * 1024
                                 << "images:" << m_cache.size() + m_baseCache.size()
                                                    + m_tileCache.size();
+                            if (includeAnnotations)
+                                finishPendingRasterPreview(page);
                         }
                         trimPageImageCaches();
 
@@ -1318,7 +1371,7 @@ QPixmap PageView::pageTile(int page, const QSize &fullSize, int tileX, int tileY
 
         m_renderPool.start(QRunnable::create(
             [this, page, key, generation, sourcePath, password, pageRegion,
-             tilePixels, dpr, includeAnnotations]() {
+             fullSize, tilePixels, dpr, includeAnnotations]() {
                 thread_local MuPdfRenderCache renderer;
                 QImage image;
                 QString error;
@@ -1330,7 +1383,8 @@ QPixmap PageView::pageTile(int page, const QSize &fullSize, int tileX, int tileY
                 }
                 QMetaObject::invokeMethod(
                     this,
-                    [this, page, key, generation, dpr, image = std::move(image),
+                    [this, page, key, generation, dpr, fullSize, includeAnnotations,
+                     image = std::move(image),
                      error = std::move(error)]() {
                         if (generation != m_renderGeneration)
                             return;
@@ -1357,6 +1411,8 @@ QPixmap PageView::pageTile(int page, const QSize &fullSize, int tileX, int tileY
                                           + m_tileCache.totalCost()) * 1024
                                 << "images:" << m_cache.size() + m_baseCache.size()
                                                    + m_tileCache.size();
+                            if (includeAnnotations)
+                                finishPendingRasterPreview(page, fullSize);
                         }
                         trimPageImageCaches();
                         if (page >= 0 && page < m_pageRects.size()) {
@@ -1503,7 +1559,8 @@ void PageView::paintEvent(QPaintEvent *event)
         const bool tiledPage =
             (fullRasterSize.width() > kPageTileThreshold
              || fullRasterSize.height() > kPageTileThreshold)
-            && !(m_erasing && m_erasePage == page);
+            && !(m_erasing && m_erasePage == page)
+            && m_pendingErasedPage != page;
         QPixmap renderedPage;
         if (tiledPage)
             drawTiledPage(painter, page, target, event->rect(), dpr);
@@ -1515,21 +1572,20 @@ void PageView::paintEvent(QPaintEvent *event)
                                     && qAbs(renderedPage.height() / dpr
                                             - target.height()) < 1.0;
         QPainterPath erasedInk;
-        if (m_erasing && m_erasePage == page && exactPageImage) {
-            for (const ErasePreviewStroke &preview : std::as_const(m_erasePreviewStrokes)) {
-                if (!preview.erased || preview.stroke.points.isEmpty())
+        const auto addErasedStrokes = [this, &erasedInk](const QVector<Stroke> &strokes) {
+            for (const Stroke &stroke : strokes) {
+                if (stroke.points.isEmpty())
                     continue;
-
                 QPainterPath strokePath;
-                const QPointF &first = preview.stroke.points.first();
+                const QPointF &first = stroke.points.first();
                 strokePath.moveTo(first.x() * m_scale, first.y() * m_scale);
-                for (int i = 1; i < preview.stroke.points.size(); ++i) {
-                    const QPointF &point = preview.stroke.points.at(i);
+                for (int i = 1; i < stroke.points.size(); ++i) {
+                    const QPointF &point = stroke.points.at(i);
                     strokePath.lineTo(point.x() * m_scale, point.y() * m_scale);
                 }
 
-                const qreal width = qMax(0.1, preview.stroke.style.widthPoints * m_scale);
-                if (preview.stroke.points.size() == 1) {
+                const qreal width = qMax(0.1, stroke.style.widthPoints * m_scale);
+                if (stroke.points.size() == 1) {
                     const QPointF point = strokePath.currentPosition();
                     erasedInk.addEllipse(point, width / 2.0, width / 2.0);
                 } else {
@@ -1540,11 +1596,23 @@ void PageView::paintEvent(QPaintEvent *event)
                     erasedInk.addPath(stroker.createStroke(strokePath));
                 }
             }
+        };
+        if (exactPageImage && m_erasing && m_erasePage == page) {
+            QVector<Stroke> erasedStrokes;
+            for (const ErasePreviewStroke &preview : std::as_const(m_erasePreviewStrokes)) {
+                if (preview.erased)
+                    erasedStrokes.append(preview.stroke);
+            }
+            addErasedStrokes(erasedStrokes);
+        }
+        if (exactPageImage && m_pendingErasedPage == page) {
+            addErasedStrokes(m_pendingErasedStrokes);
         }
         if (!renderedPage.isNull())
             painter.drawPixmap(target, renderedPage, renderedPage.rect());
-        if (m_erasing && m_erasePage == page && exactPageImage
-            && !erasedInk.isEmpty()) {
+        if (((m_erasing && m_erasePage == page)
+             || m_pendingErasedPage == page)
+            && exactPageImage && !erasedInk.isEmpty()) {
             const QPixmap basePage = pageImage(page, target.size(), dpr, false);
             painter.save();
             painter.setCompositionMode(QPainter::CompositionMode_Source);
@@ -1575,6 +1643,53 @@ void PageView::paintEvent(QPaintEvent *event)
             painter.restore();
         }
 
+        const auto drawTextPreview = [this, &painter, page, target, dpr](
+                                         const QRectF &oldBounds,
+                                         const QRectF &newBounds,
+                                         const QString &text,
+                                         const TextStyle &style) {
+            if (!oldBounds.isEmpty()) {
+                const QPixmap basePage = pageImage(page, target.size(), dpr, false);
+                if (!basePage.isNull()) {
+                    const QRectF oldRect(
+                        target.x() + oldBounds.x() * m_scale,
+                        target.y() + oldBounds.y() * m_scale,
+                        oldBounds.width() * m_scale, oldBounds.height() * m_scale);
+                    painter.save();
+                    painter.setCompositionMode(QPainter::CompositionMode_Source);
+                    painter.setClipRect(oldRect, Qt::IntersectClip);
+                    painter.drawPixmap(target, basePage, basePage.rect());
+                    painter.restore();
+                }
+            }
+
+            const QRectF textBounds(
+                target.x() + newBounds.x() * m_scale,
+                target.y() + newBounds.y() * m_scale,
+                newBounds.width() * m_scale, newBounds.height() * m_scale);
+            QFont font(style.family);
+            font.setPixelSize(qMax(1, qRound(style.sizePoints * m_scale)));
+            painter.save();
+            painter.setFont(font);
+            painter.setPen(style.color);
+            painter.drawText(textBounds, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
+                             text);
+            painter.restore();
+        };
+        if ((m_movingTextAnnotation || m_resizingTextAnnotation)
+            && m_selectedTextAnnotationPage == page) {
+            drawTextPreview(m_textAnnotationResizeOriginalBounds,
+                            m_selectedTextAnnotationBounds,
+                            m_selectedTextAnnotationContents,
+                            m_selectedTextAnnotationStyle);
+        }
+        if (m_pendingTextAnnotationPreview.page == page) {
+            drawTextPreview(m_pendingTextAnnotationPreview.oldBounds,
+                            m_pendingTextAnnotationPreview.newBounds,
+                            m_pendingTextAnnotationPreview.text,
+                            m_pendingTextAnnotationPreview.style);
+        }
+
         if (m_selectedTextAnnotationPage == page) {
             const QRectF bounds(
                 target.x() + m_selectedTextAnnotationBounds.x() * m_scale,
@@ -1594,21 +1709,13 @@ void PageView::paintEvent(QPaintEvent *event)
             for (const QPointF &corner : corners)
                 painter.drawRect(QRectF(corner.x() - 4, corner.y() - 4, 8, 8));
             painter.restore();
-
-            if (m_movingTextAnnotation || m_resizingTextAnnotation) {
-                QFont font(m_selectedTextAnnotationStyle.family);
-                font.setPixelSize(qMax(
-                    1, qRound(m_selectedTextAnnotationStyle.sizePoints * m_scale)));
-                painter.save();
-                painter.setFont(font);
-                painter.setPen(m_selectedTextAnnotationStyle.color);
-                painter.drawText(bounds, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
-                                 m_selectedTextAnnotationContents);
-                painter.restore();
-            }
         }
 
         for (const Stroke &stroke : std::as_const(m_strokes)) {
+            if (stroke.page == page)
+                drawStroke(painter, stroke, target);
+        }
+        for (const Stroke &stroke : std::as_const(m_pendingCommittedStrokes)) {
             if (stroke.page == page)
                 drawStroke(painter, stroke, target);
         }
@@ -1999,11 +2106,35 @@ void PageView::commitStrokes()
     if (m_strokes.isEmpty())
         return;
     const QVector<Stroke> strokes = m_strokes;
+    preserveCommittedStrokes(strokes);
     m_strokes.clear();
     viewport()->update();
     emit pendingStrokesChanged();
     emit pendingChangesChanged();
     emit strokesPlaced(strokes);
+}
+
+void PageView::preserveCommittedStrokes(const QVector<Stroke> &strokes)
+{
+    m_pendingCommittedStrokes += strokes;
+    viewport()->update();
+}
+
+void PageView::preserveErasedStrokes(int page, const QVector<Stroke> &strokes)
+{
+    if (strokes.isEmpty())
+        return;
+    m_pendingErasedPage = page;
+    m_pendingErasedStrokes = strokes;
+    viewport()->update();
+}
+
+void PageView::preserveTextAnnotationChange(int page, const QRectF &oldBounds,
+                                            const QRectF &newBounds, const QString &text,
+                                            const TextStyle &style)
+{
+    m_pendingTextAnnotationPreview = { page, oldBounds, newBounds, text, style };
+    viewport()->update();
 }
 
 // image placement
@@ -2247,7 +2378,12 @@ void PageView::setTextToolActive(bool active)
 void PageView::setTextStyle(const TextStyle &style)
 {
     m_style = style;
-    if (m_editor && !m_editingTextAnnotation) {
+    if (m_editor) {
+        if (m_editingTextAnnotation
+            && (m_editorStyle.family != style.family
+                || !qFuzzyCompare(m_editorStyle.sizePoints, style.sizePoints)
+                || m_editorStyle.color != style.color))
+            m_editingTextAnnotationStyleChanged = true;
         m_editorStyle = style;
         applyEditorStyle();
     }
@@ -2906,7 +3042,9 @@ void PageView::mouseReleaseEvent(QMouseEvent *event)
             emit textAnnotationBoundsChanged(m_selectedTextAnnotationPage,
                                              m_selectedTextAnnotationId,
                                              m_selectedTextAnnotationContents,
-                                             m_selectedTextAnnotationBounds);
+                                             m_textAnnotationResizeOriginalBounds,
+                                             m_selectedTextAnnotationBounds,
+                                             m_selectedTextAnnotationStyle);
         }
         return;
     }
@@ -2919,7 +3057,9 @@ void PageView::mouseReleaseEvent(QMouseEvent *event)
             emit textAnnotationBoundsChanged(m_selectedTextAnnotationPage,
                                              m_selectedTextAnnotationId,
                                              m_selectedTextAnnotationContents,
-                                             m_selectedTextAnnotationBounds);
+                                             m_textAnnotationResizeOriginalBounds,
+                                             m_selectedTextAnnotationBounds,
+                                             m_selectedTextAnnotationStyle);
         }
         return;
     }
@@ -2928,6 +3068,12 @@ void PageView::mouseReleaseEvent(QMouseEvent *event)
         const int page = m_erasePage;
         const QVector<QPointF> path = m_erasePoints;
         const double radius = m_drawStyle.widthPoints / 2.0;
+        QVector<Stroke> erasedStrokes;
+        for (const ErasePreviewStroke &preview : std::as_const(m_erasePreviewStrokes)) {
+            if (preview.erased)
+                erasedStrokes.append(preview.stroke);
+        }
+        preserveErasedStrokes(page, erasedStrokes);
         m_erasing = false;
         m_erasePoints.clear();
         m_erasePreviewStrokes.clear();
@@ -3031,11 +3177,13 @@ void PageView::startAnnotationEditor(int page, int annotationId,
     m_editingTextAnnotation = true;
     m_editingTextAnnotationId = annotationId;
     m_editingTextAnnotationOriginal = text;
+    m_editingTextAnnotationStyleChanged = false;
     m_editorStyle = style;
     m_editor->setPlainText(text);
     m_editor->moveCursor(QTextCursor::End);
     applyEditorStyle();
     m_editor->setFocus();
+    emit textAnnotationEditingStyleChanged(style);
 }
 
 void PageView::applyEditorStyle()
@@ -3080,9 +3228,11 @@ void PageView::finishEditor(bool commit)
     const bool editingAnnotation = m_editingTextAnnotation;
     const int annotationId = m_editingTextAnnotationId;
     const QString originalText = m_editingTextAnnotationOriginal;
+    const bool annotationStyleChanged = m_editingTextAnnotationStyleChanged;
     m_editingTextAnnotation = false;
     m_editingTextAnnotationId = 0;
     m_editingTextAnnotationOriginal.clear();
+    m_editingTextAnnotationStyleChanged = false;
 
     editor->hide();
     editor->deleteLater();
@@ -3096,8 +3246,8 @@ void PageView::finishEditor(bool commit)
 
     if (commit) {
         if (editingAnnotation) {
-            if (text != originalText)
-                emit textAnnotationEdited(page, annotationId, originalText, text);
+            if (text != originalText || annotationStyleChanged)
+                emit textAnnotationEdited(page, annotationId, originalText, text, style);
         } else if (!text.trimmed().isEmpty()) {
             emit textPlaced(page, box, text.trimmed(), style);
         }
@@ -3308,8 +3458,26 @@ bool PageView::eventFilter(QObject *watched, QEvent *event)
             }
         } else if (event->type() == QEvent::FocusOut) {
             const Qt::FocusReason reason = static_cast<QFocusEvent *>(event)->reason();
-            if (reason != Qt::ActiveWindowFocusReason && reason != Qt::PopupFocusReason)
-                QTimer::singleShot(0, this, [this]() { finishEditor(true); });
+            if (reason != Qt::ActiveWindowFocusReason && reason != Qt::PopupFocusReason) {
+                QTimer::singleShot(0, this, [this]() {
+                    if (!m_editor)
+                        return;
+                    QWidget *focus = QApplication::focusWidget();
+                    const auto isTextStyleControl = [](QWidget *widget) {
+                        for (; widget; widget = widget->parentWidget()) {
+                            if (widget->property("textEditorStyleControl").toBool())
+                                return true;
+                        }
+                        return false;
+                    };
+                    if (isTextStyleControl(focus)
+                        || isTextStyleControl(QApplication::widgetAt(QCursor::pos())))
+                        return;
+                    if (QApplication::activePopupWidget())
+                        return;
+                    finishEditor(true);
+                });
+            }
         }
     }
     return QAbstractScrollArea::eventFilter(watched, event);

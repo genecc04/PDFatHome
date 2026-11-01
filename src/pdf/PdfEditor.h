@@ -82,7 +82,9 @@ public:
                           int *annotationId, QRectF *bounds, QString *text,
                           QString *fontName, double *fontSize, QColor *color);
     bool updateTextAnnotation(int pageIndex, int annotationId,
-                              const QString &oldText, const QString &newText);
+                              const QString &oldText, const QString &newText,
+                              const QString &fontName, double fontSize,
+                              float red, float green, float blue);
     bool setTextAnnotationBounds(int pageIndex, int annotationId, const QString &text,
                                  const QRectF &bounds);
     bool deleteTextAnnotation(int pageIndex, int annotationId, const QString &text);

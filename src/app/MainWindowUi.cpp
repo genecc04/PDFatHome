@@ -494,6 +494,7 @@ void MainWindow::setupTextToolbar()
     fontBox->setCurrentText("Helvetica");
     fontBox->setMinimumWidth(130);
     fontBox->setFocusPolicy(Qt::NoFocus);
+    fontBox->setProperty("textEditorStyleControl", true);
     toolbar->addWidget(fontBox);
 
     auto *size = new QSpinBox(this);
@@ -503,10 +504,21 @@ void MainWindow::setupTextToolbar()
     size->setMinimumWidth(kNumericControlWidth);
     size->setCorrectionMode(QAbstractSpinBox::CorrectToNearestValue);
     size->setKeyboardTracking(false);
+    size->setProperty("textEditorStyleControl", true);
     toolbar->addWidget(size);
 
     auto *colorButton = new ColorMenuButton(QColor(0, 0, 0), this);
+    colorButton->setProperty("textEditorStyleControl", true);
     toolbar->addWidget(colorButton);
+    connect(m_view, &PageView::textAnnotationEditingStyleChanged, this,
+            [fontBox, size, colorButton](const PageView::TextStyle &style) {
+        const QSignalBlocker fontBlocker(fontBox);
+        const QSignalBlocker sizeBlocker(size);
+        const QSignalBlocker colorBlocker(colorButton);
+        fontBox->setCurrentText(style.family);
+        size->setValue(qRound(style.sizePoints));
+        colorButton->setColor(style.color);
+    });
 
     auto applyStyle = [this, fontBox, size, colorButton]() {
         PageView::TextStyle style;

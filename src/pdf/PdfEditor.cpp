@@ -1237,7 +1237,9 @@ bool sameTextAnnotation(fz_context *ctx, pdf_annot *annot, int annotationId,
 }
 
 bool PdfEditor::updateTextAnnotation(int pageIndex, int annotationId,
-                                     const QString &oldText, const QString &newText)
+                                     const QString &oldText, const QString &newText,
+                                     const QString &fontName, double fontSize,
+                                     float red, float green, float blue)
 {
     m_error.clear();
     if (!m_doc) {
@@ -1250,6 +1252,8 @@ bool PdfEditor::updateTextAnnotation(int pageIndex, int annotationId,
     }
 
     const QByteArray newTextUtf8 = newText.toUtf8();
+    const QByteArray fontUtf8 = fontName.toUtf8();
+    const float color[3] = { red, green, blue };
     clearSelectionTextCache();
     pdf_page *page = nullptr;
     bool found = false;
@@ -1263,6 +1267,8 @@ bool PdfEditor::updateTextAnnotation(int pageIndex, int annotationId,
              annot = pdf_next_annot(m_ctx, annot)) {
             if (!sameTextAnnotation(m_ctx, annot, annotationId, oldText))
                 continue;
+            pdf_set_annot_default_appearance(m_ctx, annot, fontUtf8.constData(),
+                                             float(fontSize), 3, color);
             pdf_set_annot_contents(m_ctx, annot, newTextUtf8.constData());
             pdf_update_annot(m_ctx, annot);
             found = true;

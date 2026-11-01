@@ -97,9 +97,11 @@ private:
     void placeText(int page, const QRectF &box, const QString &text,
                    const PageView::TextStyle &style);
     void updateTextAnnotation(int page, int annotationId,
-                              const QString &oldText, const QString &newText);
+                              const QString &oldText, const QString &newText,
+                              const PageView::TextStyle &style);
     void updateTextAnnotationBounds(int page, int annotationId, const QString &text,
-                                    const QRectF &bounds);
+                                    const QRectF &oldBounds, const QRectF &newBounds,
+                                    const PageView::TextStyle &style);
     void deleteTextAnnotation(int page, int annotationId, const QString &text);
     bool refreshAfterEdit(int page, const QList<int> &reselect = {},
                           const QVector<QSizeF> &pageSizes = {},
