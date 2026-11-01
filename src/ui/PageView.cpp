@@ -221,10 +221,10 @@ PageView::~PageView()
 
 // document and zoom
 
-void PageView::setDocument(PdfEditor *document)
+void PageView::setDocument(PdfEditor *document, bool preserveRasterPreviews)
 {
     m_document = document;
-    onDocumentChanged();
+    onDocumentChanged(preserveRasterPreviews);
 }
 
 void PageView::setLoading(bool loading)
@@ -233,6 +233,23 @@ void PageView::setLoading(bool loading)
         return;
 
     m_loading = loading;
+    if (loading) {
+        finishEditor(false);
+        finishFormEditor(false);
+        m_autoScroll->stop();
+        m_selecting = false;
+        m_drawing = false;
+        m_activeStroke = Stroke();
+        m_erasing = false;
+        m_erasePoints.clear();
+        m_erasePreviewStrokes.clear();
+        m_imageDrag = ImageDrag::None;
+        m_imageCropDragging = false;
+        m_movingTextAnnotation = false;
+        m_resizingTextAnnotation = false;
+        m_textAnnotationResizeCorner = -1;
+        finishImage(false);
+    }
     m_loadingFrame = 0;
     if (loading && !m_loadingSprite.isNull())
         m_loadingTimer->start();
@@ -241,6 +258,11 @@ void PageView::setLoading(bool loading)
 
     positionEmptyStateButton();
     viewport()->update();
+}
+
+void PageView::setInteractionBlocked(bool blocked)
+{
+    m_interactionBlocked = blocked;
 }
 
 void PageView::stepLoading()
@@ -289,7 +311,6 @@ void PageView::setRenderSource(const QString &path, const QString &password)
     m_renderSourcePath = path;
     m_renderPassword = password;
     invalidatePendingPageRenders();
-    m_tileCache.clear();
     m_failedPageKeys.clear();
     m_failedBaseKeys.clear();
     m_failedTileKeys.clear();
@@ -305,6 +326,9 @@ void PageView::invalidatePageRenders(const QList<int> &changedPages)
         m_failedPageKeys.clear();
         m_failedBaseKeys.clear();
         m_failedTileKeys.clear();
+        m_stalePageKeys.clear();
+        m_staleBaseKeys.clear();
+        m_staleTileKeys.clear();
         invalidatePendingPageRenders();
         viewport()->update();
         return;
@@ -313,21 +337,27 @@ void PageView::invalidatePageRenders(const QList<int> &changedPages)
     invalidatePendingPageRenders();
     const QList<quint64> keys = m_cache.keys();
     for (quint64 key : keys) {
-        if (changedPages.contains(int(key >> 40)))
+        if (changedPages.contains(int(key >> 40))) {
             m_cache.remove(key);
+            m_stalePageKeys.remove(key);
+        }
     }
     const QList<quint64> baseKeys = m_baseCache.keys();
     for (quint64 key : baseKeys) {
-        if (changedPages.contains(int(key >> 40)))
+        if (changedPages.contains(int(key >> 40))) {
             m_baseCache.remove(key);
+            m_staleBaseKeys.remove(key);
+        }
     }
     const QList<QString> tileKeys = m_tileCache.keys();
     for (const QString &key : tileKeys) {
         const int separator = key.indexOf(QLatin1Char(':'));
         bool ok = false;
         const int page = key.left(separator).toInt(&ok);
-        if (ok && changedPages.contains(page))
+        if (ok && changedPages.contains(page)) {
             m_tileCache.remove(key);
+            m_staleTileKeys.remove(key);
+        }
     }
     for (int page : changedPages) {
         for (auto it = m_failedPageKeys.begin(); it != m_failedPageKeys.end();) {
@@ -359,7 +389,17 @@ void PageView::invalidatePageRenders(const QList<int> &changedPages)
     }
 }
 
-void PageView::onDocumentChanged()
+void PageView::markCachedRastersStale()
+{
+    for (quint64 key : m_cache.keys())
+        m_stalePageKeys.insert(key);
+    for (quint64 key : m_baseCache.keys())
+        m_staleBaseKeys.insert(key);
+    for (const QString &key : m_tileCache.keys())
+        m_staleTileKeys.insert(key);
+}
+
+void PageView::onDocumentChanged(bool preserveRasterPreviews)
 {
     invalidatePendingPageRenders();
     m_zoomTimer->stop();
@@ -393,9 +433,16 @@ void PageView::onDocumentChanged()
     if (hadStrokes)
         emit pendingStrokesChanged();
 
-    m_cache.clear();
-    m_baseCache.clear();
-    m_tileCache.clear();
+    if (preserveRasterPreviews) {
+        markCachedRastersStale();
+    } else {
+        m_cache.clear();
+        m_baseCache.clear();
+        m_tileCache.clear();
+        m_stalePageKeys.clear();
+        m_staleBaseKeys.clear();
+        m_staleTileKeys.clear();
+    }
     m_failedPageKeys.clear();
     m_failedBaseKeys.clear();
     m_failedTileKeys.clear();
@@ -662,18 +709,20 @@ void PageView::trimPageImageCaches()
     const int keepFirst = qMax(0, first - kPageCachePrefetchRadius);
     const int keepLast = qMin(m_pageRects.size() - 1, last + kPageCachePrefetchRadius);
     int evicted = 0;
-    const auto evictDistantPages = [&](QCache<quint64, QPixmap> &cache) {
+    const auto evictDistantPages = [&](QCache<quint64, QPixmap> &cache,
+                                       QSet<quint64> &staleKeys) {
         const QList<quint64> keys = cache.keys();
         for (quint64 key : keys) {
             const int page = int(key >> 40);
             if (page < keepFirst || page > keepLast) {
                 cache.remove(key);
+                staleKeys.remove(key);
                 ++evicted;
             }
         }
     };
-    evictDistantPages(m_cache);
-    evictDistantPages(m_baseCache);
+    evictDistantPages(m_cache, m_stalePageKeys);
+    evictDistantPages(m_baseCache, m_staleBaseKeys);
     const QList<QString> tileKeys = m_tileCache.keys();
     for (const QString &key : tileKeys) {
         const int separator = key.indexOf(QLatin1Char(':'));
@@ -681,6 +730,7 @@ void PageView::trimPageImageCaches()
         const int page = key.left(separator).toInt(&ok);
         if (ok && (page < keepFirst || page > keepLast)) {
             m_tileCache.remove(key);
+            m_staleTileKeys.remove(key);
             ++evicted;
         }
     }
@@ -789,18 +839,21 @@ void PageView::enforcePageRasterBudget()
             break;
 
         bool removed = false;
-        const auto removeOneForPage = [farthestPage](QCache<quint64, QPixmap> &cache) {
+        const auto removeOneForPage = [farthestPage](
+                                          QCache<quint64, QPixmap> &cache,
+                                          QSet<quint64> &staleKeys) {
             for (quint64 key : cache.keys()) {
                 if (int(key >> 40) == farthestPage) {
                     cache.remove(key);
+                    staleKeys.remove(key);
                     return true;
                 }
             }
             return false;
         };
-        removed = removeOneForPage(m_baseCache);
+        removed = removeOneForPage(m_baseCache, m_staleBaseKeys);
         if (!removed)
-            removed = removeOneForPage(m_cache);
+            removed = removeOneForPage(m_cache, m_stalePageKeys);
         if (!removed) {
             for (const QString &key : m_tileCache.keys()) {
                 const int separator = key.indexOf(QLatin1Char(':'));
@@ -808,6 +861,7 @@ void PageView::enforcePageRasterBudget()
                 const int page = key.left(separator).toInt(&ok);
                 if (ok && page == farthestPage) {
                     m_tileCache.remove(key);
+                    m_staleTileKeys.remove(key);
                     removed = true;
                     break;
                 }
@@ -1101,10 +1155,13 @@ QPixmap PageView::pageImage(int page, const QSize &size, qreal dpr,
                                     ? m_failedPageKeys : m_failedBaseKeys;
     QSet<quint64> &pendingKeys = includeAnnotations
                                      ? m_pendingPageKeys : m_pendingBaseKeys;
-    if (QPixmap *cached = cache.object(key))
+    QPixmap *cached = cache.object(key);
+    const bool stale = includeAnnotations ? m_stalePageKeys.contains(key)
+                                          : m_staleBaseKeys.contains(key);
+    if (cached && !stale)
         return *cached;
     if (failedKeys.contains(key))
-        return QPixmap();
+        return cached ? *cached : QPixmap();
 
     if (!pendingKeys.contains(key)
         && m_pendingPageKeys.size() + m_pendingBaseKeys.size()
@@ -1149,6 +1206,10 @@ QPixmap PageView::pageImage(int page, const QSize &size, qreal dpr,
                                        .arg(page + 1).arg(error);
                         } else {
                             failed.remove(key);
+                            if (includeAnnotations)
+                                m_stalePageKeys.remove(key);
+                            else
+                                m_staleBaseKeys.remove(key);
                             QPixmap pixmap = QPixmap::fromImage(image);
                             pixmap.setDevicePixelRatio(dpr);
                             const qint64 bytes =
@@ -1185,6 +1246,9 @@ QPixmap PageView::pageImage(int page, const QSize &size, qreal dpr,
         m_renderRequestsSaturated = true;
     }
 
+    if (cached)
+        return *cached;
+
     const QList<quint64> candidates = cache.keys();
     QPixmap closestPreview;
     double closestScore = std::numeric_limits<double>::max();
@@ -1219,10 +1283,12 @@ QPixmap PageView::pageTile(int page, const QSize &fullSize, int tileX, int tileY
     const QString key = QStringLiteral("%1:%2:%3:%4:%5")
                             .arg(page).arg(fullSize.width()).arg(fullSize.height())
                             .arg(tileX).arg(tileY);
-    if (QPixmap *cached = m_tileCache.object(key))
+    QPixmap *cached = m_tileCache.object(key);
+    const bool stale = m_staleTileKeys.contains(key);
+    if (cached && !stale)
         return *cached;
     if (m_failedTileKeys.contains(key))
-        return {};
+        return cached ? *cached : QPixmap();
 
     if (!m_pendingTileKeys.contains(key)
         && m_pendingPageKeys.size() + m_pendingBaseKeys.size()
@@ -1263,6 +1329,7 @@ QPixmap PageView::pageTile(int page, const QSize &fullSize, int tileX, int tileY
                                 << QStringLiteral("Could not render tile for PDF page %1: %2")
                                        .arg(page + 1).arg(error);
                         } else {
+                            m_staleTileKeys.remove(key);
                             QPixmap pixmap = QPixmap::fromImage(image);
                             pixmap.setDevicePixelRatio(dpr);
                             const qint64 bytes =
@@ -1297,7 +1364,7 @@ QPixmap PageView::pageTile(int page, const QSize &fullSize, int tileX, int tileY
         m_renderRequestsSaturated = true;
     }
 
-    return {};
+    return cached ? *cached : QPixmap();
 }
 
 void PageView::drawTiledPage(QPainter &painter, int page, const QRect &target,
@@ -1576,6 +1643,11 @@ void PageView::scrollContentsBy(int dx, int dy)
 
 void PageView::wheelEvent(QWheelEvent *event)
 {
+    if (m_loading || m_interactionBlocked) {
+        event->accept();
+        return;
+    }
+
     if (event->modifiers() & Qt::ControlModifier) {
         const double currentZoom = m_zoomTimer->isActive()
                                        ? m_pendingZoomFactor
@@ -1591,8 +1663,10 @@ void PageView::wheelEvent(QWheelEvent *event)
 
 void PageView::keyPressEvent(QKeyEvent *event)
 {
-    if (m_loading)
+    if (m_loading || m_interactionBlocked) {
+        event->accept();
         return;
+    }
 
     if (m_imageAwaiting || m_imageActive) {
         if (event->key() == Qt::Key_Escape) {
@@ -2318,8 +2392,10 @@ bool PageView::hasPendingChanges() const
 
 void PageView::mousePressEvent(QMouseEvent *event)
 {
-    if (m_loading)
+    if (m_loading || m_interactionBlocked) {
+        event->accept();
         return;
+    }
 
     const QPoint pos = event->position().toPoint();
 
@@ -2551,8 +2627,10 @@ void PageView::mousePressEvent(QMouseEvent *event)
 
 void PageView::mouseDoubleClickEvent(QMouseEvent *event)
 {
-    if (m_loading)
+    if (m_loading || m_interactionBlocked) {
+        event->accept();
         return;
+    }
 
     if (!m_textTool && !m_drawTool && event->button() == Qt::LeftButton) {
         const QPoint pos = event->position().toPoint();
@@ -2579,6 +2657,9 @@ void PageView::mouseDoubleClickEvent(QMouseEvent *event)
 
 void PageView::mouseMoveEvent(QMouseEvent *event)
 {
+    if (m_loading || m_interactionBlocked)
+        return;
+
     const QPoint pos = event->position().toPoint();
     const PdfEditor::Link hoveredLink = linkAtViewportPoint(pos);
     setHoveredLink(hoveredLink.url);
@@ -2747,6 +2828,11 @@ void PageView::mouseMoveEvent(QMouseEvent *event)
 
 void PageView::mouseReleaseEvent(QMouseEvent *event)
 {
+    if (m_loading || m_interactionBlocked) {
+        event->accept();
+        return;
+    }
+
     if (m_pressedLinkPage >= 0 && event->button() == Qt::LeftButton) {
         const int pressedPage = m_pressedLinkPage;
         const QUrl pressedUrl = m_pressedLinkUrl;
@@ -3123,6 +3209,13 @@ QString PageView::formEditorValue() const
 
 bool PageView::eventFilter(QObject *watched, QEvent *event)
 {
+    if (m_interactionBlocked
+        && (event->type() == QEvent::KeyPress || event->type() == QEvent::KeyRelease
+            || event->type() == QEvent::MouseButtonPress
+            || event->type() == QEvent::MouseButtonRelease
+            || event->type() == QEvent::MouseButtonDblClick))
+        return true;
+
     if (watched == viewport() && event->type() == QEvent::Leave)
         setHoveredLink(QUrl());
 

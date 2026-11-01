@@ -41,6 +41,17 @@ protected:
 
 private:
     struct DocumentLoadResult;
+    class EditOperationGuard
+    {
+    public:
+        explicit EditOperationGuard(MainWindow *window);
+        ~EditOperationGuard();
+        EditOperationGuard(const EditOperationGuard &) = delete;
+        EditOperationGuard &operator=(const EditOperationGuard &) = delete;
+
+    private:
+        MainWindow *m_window;
+    };
 
     // setup
     void setupViewer();
@@ -63,7 +74,8 @@ private:
     bool save();
     bool saveAs();
     void goToPage(int page);
-    bool showFile(const QString &path, int page, bool reportErrors = true);
+    bool showFile(const QString &path, int page, bool reportErrors = true,
+                  bool preserveRasterPreviews = false);
     void clearPageRenderCaches();
     void addRecentFile(const QString &path);
     void setDocumentPassword();
@@ -90,7 +102,8 @@ private:
                                     const QRectF &bounds);
     void deleteTextAnnotation(int page, int annotationId, const QString &text);
     bool refreshAfterEdit(int page, const QList<int> &reselect = {},
-                          const QVector<QSizeF> &pageSizes = {});
+                          const QVector<QSizeF> &pageSizes = {},
+                          bool preserveRasterPreviews = false);
     bool refreshAfterPageEdit(const QList<int> &changedPages, int page);
     QList<int> targetPages() const;
     void setupDrawToolbar();
@@ -109,6 +122,9 @@ private:
     bool confirmDiscard();
     void updateTitle();
     void updateActions();
+    void setBusyCursor(bool busy);
+    void beginEditOperation();
+    void endEditOperation();
     bool reopenEditor(const QString &path);
     void removeSnapshots(const QStringList &paths);
     bool removeTempFile(const QString &path, bool reportFailure = false);
@@ -154,6 +170,10 @@ private:
     std::atomic_bool m_closing{false};
     QThreadPool m_documentLoadPool;
     bool m_documentLoadPending = false;
+    bool m_documentOperationPending = false;
+    int m_editOperationDepth = 0;
+    quint64 m_editOperationGeneration = 0;
+    bool m_busyCursorActive = false;
     EditHistory m_history;
     QTemporaryDir m_tempDir;
     QString m_currentPath;

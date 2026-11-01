@@ -52,7 +52,8 @@ void MainWindow::setupViewer()
             this, &MainWindow::updateTextAnnotationBounds);
     connect(m_view, &PageView::textAnnotationSelectionChanged, this, [this](bool selected) {
         if (m_deleteTextAction)
-            m_deleteTextAction->setEnabled(selected && m_editor != nullptr);
+            m_deleteTextAction->setEnabled(
+                selected && m_editor != nullptr && !m_documentLoadPending);
     });
     connect(m_view, &PageView::textToolFinished, this, [this]() {
         m_addTextAction->setChecked(false);
@@ -70,8 +71,8 @@ void MainWindow::setupViewer()
     connect(m_view, &PageView::imagePlaced, this, &MainWindow::placeImage);
     connect(m_view, &PageView::imagePlacementStateChanged, this,
             [this](bool active, bool positioned) {
-        m_cancelImageAction->setEnabled(active);
-        m_cropImageAction->setEnabled(positioned);
+        m_cancelImageAction->setEnabled(active && !m_documentLoadPending);
+        m_cropImageAction->setEnabled(positioned && !m_documentLoadPending);
         if (!positioned) {
             QSignalBlocker blocker(m_cropImageAction);
             m_cropImageAction->setChecked(false);

@@ -71,8 +71,9 @@ public:
     explicit PageView(QWidget *parent = nullptr);
     ~PageView() override;
 
-    void setDocument(PdfEditor *document);
+    void setDocument(PdfEditor *document, bool preserveRasterPreviews = false);
     void setLoading(bool loading);
+    void setInteractionBlocked(bool blocked);
     void setPageSizeHint(const QVector<QSizeF> &sizes);
     QVector<QSizeF> pageSizes() const { return m_pageSizes; }
     QPair<int, int> visiblePageRange() const;
@@ -83,6 +84,9 @@ public:
     void setCurrentSearchResultIndex(int index);
 
     int currentPage() const { return m_currentPage; }
+    bool hasSelectedTextAnnotation() const { return m_selectedTextAnnotationPage >= 0; }
+    bool hasActiveImagePlacement() const { return m_imageAwaiting || m_imageActive; }
+    bool hasPositionedImage() const { return m_imageActive; }
     void jumpToPage(int page, const QPointF &location = QPointF());
 
     void setZoomMode(ZoomMode mode);
@@ -195,7 +199,8 @@ private:
         bool loaded = false;
     };
 
-    void onDocumentChanged();
+    void onDocumentChanged(bool preserveRasterPreviews);
+    void markCachedRastersStale();
     void invalidatePendingPageRenders();
     void discardQueuedPageRenders();
     void trimPageImageCaches();
@@ -271,6 +276,7 @@ private:
     QPixmap m_loadingSprite;
     QTimer *m_loadingTimer = nullptr;
     bool m_loading = false;
+    bool m_interactionBlocked = false;
     int m_loadingFrame = 0;
     int m_searchIndex = -1;
 
@@ -298,9 +304,12 @@ private:
     QCache<QString, QPixmap> m_tileCache;
     QSet<quint64> m_failedPageKeys;
     QSet<quint64> m_failedBaseKeys;
+    QSet<quint64> m_stalePageKeys;
+    QSet<quint64> m_staleBaseKeys;
     QSet<quint64> m_pendingPageKeys;
     QSet<quint64> m_pendingBaseKeys;
     QSet<QString> m_failedTileKeys;
+    QSet<QString> m_staleTileKeys;
     QSet<QString> m_pendingTileKeys;
 
     // text tool

@@ -61,6 +61,7 @@ void MainWindow::rotateSelectedPages(int degrees)
 {
     if (!m_editor)
         return;
+    EditOperationGuard operation(this);
 
     const QList<int> pages = targetPages();
     const int viewPage = m_view->currentPage();
@@ -82,7 +83,7 @@ void MainWindow::rotateSelectedPages(int degrees)
         }
     }
 
-    if (refreshAfterEdit(viewPage, pages, sizes))
+    if (refreshAfterEdit(viewPage, pages, sizes, true))
         statusBar()->showMessage(QString("Rotated %1 page(s)").arg(pages.size()), 3000);
 }
 
@@ -99,6 +100,7 @@ void MainWindow::deleteSelectedPages()
         return;
     }
 
+    EditOperationGuard operation(this);
     for (int i = pages.size() - 1; i >= 0; --i) {
         if (!m_editor->deletePage(pages.at(i))) {
             QMessageBox::warning(this, "Delete failed", m_editor->lastError());
@@ -121,8 +123,9 @@ void MainWindow::deleteSelectedPages()
 
 void MainWindow::movePage(int from, int to)
 {
-    if (!m_editor)
+    if (!m_editor || m_documentLoadPending || m_documentOperationPending)
         return;
+    EditOperationGuard operation(this);
 
     if (!m_editor->movePage(from, to)) {
         QMessageBox::warning(this, "Move failed", m_editor->lastError());
@@ -160,6 +163,7 @@ void MainWindow::extractPages()
         return;
     }
 
+    EditOperationGuard operation(this);
     PdfEditor extractor;
     if (!extractor.open(m_history.current(), m_password)
         || !extractor.keepOnlyPages(dialog.firstPage(), dialog.lastPage())
@@ -192,6 +196,7 @@ void MainWindow::insertPages()
     if (!ok)
         return;
 
+    EditOperationGuard operation(this);
     if (!m_editor->insertPagesFrom(source, after)) {
         QMessageBox::warning(this, "Insert failed", m_editor->lastError());
         return;
@@ -212,6 +217,7 @@ void MainWindow::highlightText()
     if (!ok || text.trimmed().isEmpty())
         return;
 
+    EditOperationGuard operation(this);
     const int page = m_view->currentPage();
     QList<int> changedPages;
 
@@ -261,6 +267,7 @@ void MainWindow::placeText(int page, const QRectF &box, const QString &text,
 {
     if (!m_editor)
         return;
+    EditOperationGuard operation(this);
 
     if (!m_editor->addTextBox(page, box, text, annotationFontName(style),
                               style.sizePoints, style.color.redF(),
@@ -288,6 +295,7 @@ void MainWindow::updateTextAnnotation(int page, int annotationId,
         return;
     }
 
+    EditOperationGuard operation(this);
     if (!m_editor->updateTextAnnotation(page, annotationId, oldText, newText)) {
         QMessageBox::warning(this, "Edit added text", m_editor->lastError());
         reopenEditor(m_history.current());
@@ -301,6 +309,7 @@ void MainWindow::deleteTextAnnotation(int page, int annotationId, const QString 
 {
     if (!m_editor)
         return;
+    EditOperationGuard operation(this);
 
     if (!m_editor->deleteTextAnnotation(page, annotationId, text)) {
         QMessageBox::warning(this, "Delete added text", m_editor->lastError());
@@ -317,6 +326,7 @@ void MainWindow::updateTextAnnotationBounds(int page, int annotationId,
 {
     if (!m_editor)
         return;
+    EditOperationGuard operation(this);
 
     if (!m_editor->setTextAnnotationBounds(page, annotationId, text, bounds)) {
         QMessageBox::warning(this, "Update text box failed", m_editor->lastError());
@@ -366,6 +376,7 @@ void MainWindow::placeImage(int page, const QRectF &box, const QImage &image)
 {
     if (!m_editor)
         return;
+    EditOperationGuard operation(this);
 
     const QByteArray data = encodeImageForPdf(image);
     if (data.isEmpty()) {
@@ -433,6 +444,7 @@ bool MainWindow::fillFormField(int page, const QPointF &point, PageView::FormFie
         return false;
     }
 
+    EditOperationGuard operation(this);
     if (!m_editor->setFormFieldValue(page, field.widgetIndex, QString())) {
         QMessageBox::warning(this, "Fill form failed", m_editor->lastError());
         reopenEditor(m_history.current());
@@ -447,6 +459,7 @@ bool MainWindow::commitFormField(int page, int widgetIndex, const QString &value
 {
     if (!m_editor)
         return false;
+    EditOperationGuard operation(this);
     if (!m_editor->setFormFieldValue(page, widgetIndex, value)) {
         QMessageBox::warning(this, "Fill form failed", m_editor->lastError());
         reopenEditor(m_history.current());
@@ -460,6 +473,7 @@ void MainWindow::placeStrokes(const QVector<PageView::Stroke> &strokes)
 {
     if (!m_editor || strokes.isEmpty())
         return;
+    EditOperationGuard operation(this);
 
     for (const PageView::Stroke &stroke : strokes) {
         if (!m_editor->addInkStroke(stroke.page, stroke.points,
@@ -486,6 +500,7 @@ void MainWindow::eraseInk(int page, const QVector<QPointF> &path, double radius)
 {
     if (!m_editor)
         return;
+    EditOperationGuard operation(this);
 
     int removed = 0;
     if (!m_editor->eraseInk(page, path, radius, &removed)) {
@@ -506,6 +521,8 @@ void MainWindow::eraseInk(int page, const QVector<QPointF> &path, double radius)
 
 void MainWindow::undo()
 {
+    if (m_documentLoadPending || m_documentOperationPending)
+        return;
     if (m_view->undoLastStroke())
         return;
     stepHistory(m_history.undo());
@@ -513,6 +530,8 @@ void MainWindow::undo()
 
 void MainWindow::redo()
 {
+    if (m_documentLoadPending || m_documentOperationPending)
+        return;
     stepHistory(m_history.redo());
 }
 
@@ -520,6 +539,7 @@ void MainWindow::stepHistory(const QString &path)
 {
     if (path.isEmpty())
         return;
+    EditOperationGuard operation(this);
 
     const int page = m_view->currentPage();
     if (!showFile(path, page))

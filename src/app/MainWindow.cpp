@@ -10,6 +10,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QDockWidget>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QInputDialog>
@@ -18,6 +19,18 @@
 #include <QSettings>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QTimer>
+
+MainWindow::EditOperationGuard::EditOperationGuard(MainWindow *window)
+    : m_window(window)
+{
+    m_window->beginEditOperation();
+}
+
+MainWindow::EditOperationGuard::~EditOperationGuard()
+{
+    m_window->endEditOperation();
+}
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -47,6 +60,7 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    setBusyCursor(false);
     m_documentLoadPool.waitForDone();   // the worker holds `this`; let it finish first
     if (m_view) {
         m_view->invalidatePageRenders();
@@ -119,16 +133,18 @@ void MainWindow::updateTitle()
 
 void MainWindow::updateActions()
 {
-    const bool editable = (m_editor != nullptr) && !m_documentLoadPending;
+    const bool editable = (m_editor != nullptr) && !m_documentLoadPending
+                          && !m_documentOperationPending;
 
     m_saveAction->setEnabled(editable && isDocumentModified());
+    m_saveAsAction->setEnabled(editable);
     m_setPasswordAction->setEnabled(editable);
     m_removePasswordAction->setEnabled(editable && isPasswordProtected());
     m_extractAction->setEnabled(editable);
     m_insertAction->setEnabled(editable);
     m_highlightAction->setEnabled(editable);
     m_addTextAction->setEnabled(editable);
-    if (!editable && m_addTextAction->isChecked())
+    if ((!m_editor || m_documentLoadPending) && m_addTextAction->isChecked())
         m_addTextAction->setChecked(false);
     m_rotateLeftAction->setEnabled(editable);
     m_rotateRightAction->setEnabled(editable);
@@ -138,10 +154,59 @@ void MainWindow::updateActions()
     m_undoAction->setEnabled(editable && (m_history.canUndo() || m_view->hasPendingStrokes()));
     m_redoAction->setEnabled(editable && m_history.canRedo());
     m_addImageAction->setEnabled(editable);
+    m_cropImageAction->setEnabled(editable && m_view->hasPositionedImage());
+    m_cancelImageAction->setEnabled(editable && m_view->hasActiveImagePlacement());
+    m_deleteTextAction->setEnabled(editable && m_view->hasSelectedTextAnnotation());
 
     m_drawAction->setEnabled(editable);
-    if (!editable && m_drawAction->isChecked())
+    if ((!m_editor || m_documentLoadPending) && m_drawAction->isChecked())
         m_drawAction->setChecked(false);
+}
+
+void MainWindow::setBusyCursor(bool busy)
+{
+    if (busy == m_busyCursorActive)
+        return;
+
+    if (busy)
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+    else
+        QApplication::restoreOverrideCursor();
+    m_busyCursorActive = busy;
+}
+
+void MainWindow::beginEditOperation()
+{
+    ++m_editOperationDepth;
+    if (m_editOperationDepth != 1)
+        return;
+
+    ++m_editOperationGeneration;
+    m_documentOperationPending = true;
+    m_view->setInteractionBlocked(true);
+    setBusyCursor(true);
+    updateActions();
+    QApplication::processEvents(QEventLoop::ExcludeUserInputEvents);
+}
+
+void MainWindow::endEditOperation()
+{
+    if (m_editOperationDepth <= 0)
+        return;
+    if (--m_editOperationDepth != 0)
+        return;
+
+    const quint64 generation = ++m_editOperationGeneration;
+    QTimer::singleShot(150, this, [this, generation]() {
+        if (generation != m_editOperationGeneration || m_editOperationDepth != 0)
+            return;
+
+        m_documentOperationPending = false;
+        m_view->setInteractionBlocked(false);
+        setBusyCursor(false);
+        updateActions();
+        updateTitle();
+    });
 }
 
 bool MainWindow::reopenEditor(const QString &path)

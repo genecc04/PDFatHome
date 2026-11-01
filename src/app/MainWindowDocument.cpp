@@ -146,6 +146,7 @@ void MainWindow::loadDocument(const QString &path)
         return;
 
     m_documentLoadPending = true;
+    setBusyCursor(true);
     m_view->setLoading(true);
     updateActions();
 
@@ -218,12 +219,14 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
 {
     auto endLoading = [this]() {
         m_documentLoadPending = false;
+        setBusyCursor(false);
         m_view->setLoading(false);
         updateActions();
         updateTitle();
     };
 
     if (result->passwordRejected) {
+        setBusyCursor(false);
         m_view->setLoading(false);
         bool ok = false;
         const QString entered = QInputDialog::getText(
@@ -232,6 +235,7 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
                          : "Incorrect password. Try again:",
             QLineEdit::Password, QString(), &ok);
         if (ok) {
+            setBusyCursor(true);
             m_view->setLoading(true);
             startDocumentLoad(path, entered, false, workingPath);
         } else {
@@ -313,9 +317,11 @@ void MainWindow::goToPage(int page)
     m_view->jumpToPage(page);
 }
 
-bool MainWindow::showFile(const QString &path, int page, bool reportErrors)
+bool MainWindow::showFile(const QString &path, int page, bool reportErrors,
+                          bool preserveRasterPreviews)
 {
-    clearPageRenderCaches();
+    if (!preserveRasterPreviews)
+        clearPageRenderCaches();
     std::unique_ptr<PdfEditor> replacement;
     PdfEditor *document = m_editor.get();
     if (!document || document->filePath() != path) {
@@ -361,7 +367,7 @@ bool MainWindow::showFile(const QString &path, int page, bool reportErrors)
     m_formFieldPagesLoaded.clear();
     m_view->clearFormFieldOverlays();
     m_view->setPageSizeHint(pageSizes);
-    m_view->setDocument(m_document);
+    m_view->setDocument(m_document, preserveRasterPreviews);
     m_view->setPageSizeHint(QVector<QSizeF>());
     m_thumbnails->setDocument(m_document);
     m_search->setDocument(m_document);
@@ -497,6 +503,7 @@ bool MainWindow::saveAs()
         return false;
     }
 
+    EditOperationGuard operation(this);
     PdfEditor saver;
     if (!saver.open(m_history.current(), m_password)
         || !saver.saveAs(dest, true, saveEncryption(), m_newPassword)) {
@@ -534,6 +541,7 @@ bool MainWindow::save()
     }
     const int page = m_view->currentPage();
 
+    EditOperationGuard operation(this);
     {
         PdfEditor saver;
         if (!saver.open(m_history.current(), m_password)
@@ -578,8 +586,11 @@ bool MainWindow::save()
 }
 
 bool MainWindow::refreshAfterEdit(int page, const QList<int> &reselect,
-                                  const QVector<QSizeF> &pageSizes)
+                                  const QVector<QSizeF> &pageSizes,
+                                  bool preserveRasterPreviews)
 {
+    EditOperationGuard operation(this);
+
     if (!m_tempDir.isValid()) {
         QMessageBox::warning(this, "Edit failed", "Could not create a temporary folder.");
         reopenEditor(m_history.current());
@@ -599,7 +610,7 @@ bool MainWindow::refreshAfterEdit(int page, const QList<int> &reselect,
     if (!pageSizes.isEmpty())
         m_pageSizeCache.insert(newPath, pageSizes);
 
-    if (!showFile(newPath, page)) {
+    if (!showFile(newPath, page, true, preserveRasterPreviews)) {
         QFile::remove(newPath);
         showFile(m_history.current(), page, false);
         updateActions();
@@ -618,6 +629,8 @@ bool MainWindow::refreshAfterEdit(int page, const QList<int> &reselect,
 
 bool MainWindow::refreshAfterPageEdit(const QList<int> &changedPages, int page)
 {
+    EditOperationGuard operation(this);
+
     if (!m_tempDir.isValid()) {
         QMessageBox::warning(this, "Edit failed", "Could not create a temporary folder.");
         reopenEditor(m_history.current());
