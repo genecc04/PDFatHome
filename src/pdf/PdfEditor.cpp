@@ -912,8 +912,10 @@ bool PdfEditor::highlightText(const QString &text, QList<int> *changedPages,
         }
 
         pdf_page *page = nullptr;
+        pdf_annot *annot = nullptr;
         int hits = 0;
         fz_var(page);
+        fz_var(annot);
         fz_var(hits);
 
         fz_try(m_ctx)
@@ -927,7 +929,7 @@ bool PdfEditor::highlightText(const QString &text, QList<int> *changedPages,
                          pageIndex + 1, kMaxHitsPerPage);
             }
             if (hits > 0) {
-                pdf_annot *annot = pdf_create_annot(m_ctx, page, PDF_ANNOT_HIGHLIGHT);
+                annot = pdf_create_annot(m_ctx, page, PDF_ANNOT_HIGHLIGHT);
                 const float yellow[3] = { 1.0f, 0.92f, 0.0f };
                 pdf_set_annot_color(m_ctx, annot, 3, yellow);
                 pdf_set_annot_quad_points(m_ctx, annot, hits, quads.data());
@@ -936,6 +938,8 @@ bool PdfEditor::highlightText(const QString &text, QList<int> *changedPages,
         }
         fz_always(m_ctx)
         {
+            if (annot)
+                pdf_drop_annot(m_ctx, annot);
             if (page)
                 fz_drop_page(m_ctx, &page->super);
         }
@@ -1311,13 +1315,15 @@ bool PdfEditor::addInkStroke(int pageIndex, const QVector<QPointF> &points,
     const float color[3] = { red, green, blue };
 
     pdf_page *page = nullptr;
+    pdf_annot *annot = nullptr;
     fz_var(page);
+    fz_var(annot);
 
     fz_try(m_ctx)
     {
         page = pdf_load_page(m_ctx, m_doc, pageIndex);
 
-        pdf_annot *annot = pdf_create_annot(m_ctx, page, PDF_ANNOT_INK);
+        annot = pdf_create_annot(m_ctx, page, PDF_ANNOT_INK);
         pdf_set_annot_color(m_ctx, annot, 3, color);
         pdf_set_annot_border(m_ctx, annot, float(width));
         pdf_set_annot_opacity(m_ctx, annot, float(opacity));
@@ -1326,6 +1332,8 @@ bool PdfEditor::addInkStroke(int pageIndex, const QVector<QPointF> &points,
     }
     fz_always(m_ctx)
     {
+        if (annot)
+            pdf_drop_annot(m_ctx, annot);
         if (page)
             fz_drop_page(m_ctx, &page->super);
     }
@@ -1522,9 +1530,11 @@ bool PdfEditor::addImageStamp(int pageIndex, const QRectF &box, const QByteArray
                                       float(box.right()), float(box.bottom()));
 
     pdf_page *page = nullptr;
+    pdf_annot *annot = nullptr;
     fz_buffer *buffer = nullptr;
     fz_image *image = nullptr;
     fz_var(page);
+    fz_var(annot);
     fz_var(buffer);
     fz_var(image);
 
@@ -1534,7 +1544,7 @@ bool PdfEditor::addImageStamp(int pageIndex, const QRectF &box, const QByteArray
         image = fz_new_image_from_buffer(m_ctx, buffer);
         page = pdf_load_page(m_ctx, m_doc, pageIndex);
 
-        pdf_annot *annot = pdf_create_annot(m_ctx, page, PDF_ANNOT_STAMP);
+        annot = pdf_create_annot(m_ctx, page, PDF_ANNOT_STAMP);
         pdf_set_annot_rect(m_ctx, annot, rect);
         pdf_set_annot_stamp_image(m_ctx, annot, image);
         pdf_set_annot_rect(m_ctx, annot, rect);
@@ -1542,6 +1552,8 @@ bool PdfEditor::addImageStamp(int pageIndex, const QRectF &box, const QByteArray
     }
     fz_always(m_ctx)
     {
+        if (annot)
+            pdf_drop_annot(m_ctx, annot);
         if (image)
             fz_drop_image(m_ctx, image);
         if (buffer)
