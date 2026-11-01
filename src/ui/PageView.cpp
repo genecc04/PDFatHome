@@ -1516,8 +1516,8 @@ void PageView::paintEvent(QPaintEvent *event)
                                             - target.width()) < 1.0
                                     && qAbs(renderedPage.height() / dpr
                                             - target.height()) < 1.0;
+        QPainterPath erasedInk;
         if (m_erasing && m_erasePage == page && exactPageImage) {
-            QPainterPath erasedInk;
             for (const ErasePreviewStroke &preview : std::as_const(m_erasePreviewStrokes)) {
                 if (!preview.erased || preview.stroke.points.isEmpty())
                     continue;
@@ -1542,16 +1542,19 @@ void PageView::paintEvent(QPaintEvent *event)
                     erasedInk.addPath(stroker.createStroke(strokePath));
                 }
             }
-            if (!erasedInk.isEmpty()) {
-                QPainter pagePainter(&renderedPage);
-                pagePainter.setCompositionMode(QPainter::CompositionMode_Source);
-                pagePainter.setClipPath(erasedInk);
-                pagePainter.drawPixmap(
-                    QPoint(0, 0), pageImage(page, target.size(), dpr, false));
-            }
         }
         if (!renderedPage.isNull())
             painter.drawPixmap(target, renderedPage, renderedPage.rect());
+        if (m_erasing && m_erasePage == page && exactPageImage
+            && !erasedInk.isEmpty()) {
+            const QPixmap basePage = pageImage(page, target.size(), dpr, false);
+            painter.save();
+            painter.setCompositionMode(QPainter::CompositionMode_Source);
+            painter.setClipPath(erasedInk.translated(target.topLeft()),
+                                Qt::IntersectClip);
+            painter.drawPixmap(target, basePage, basePage.rect());
+            painter.restore();
+        }
         drawSearchResults(painter, page, target, current);
         drawFormFieldOverlays(painter, page, target);
 
@@ -1930,9 +1933,9 @@ void PageView::setInkStrokeHandler(
     m_inkStrokeHandler = handler;
 }
 
-bool PageView::updateErasePreview(const QPointF &start, const QPointF &end)
+void PageView::updateErasePreview(const QPointF &start, const QPointF &end,
+                                  QRectF &changedBounds)
 {
-    bool erasedAny = false;
     const QRectF eraserBounds = QRectF(start, end).normalized();
     const double eraserRadius = m_drawStyle.widthPoints / 2.0;
     for (ErasePreviewStroke &preview : m_erasePreviewStrokes) {
@@ -1957,10 +1960,24 @@ bool PageView::updateErasePreview(const QPointF &start, const QPointF &end)
                 }
             }
         }
-        if (preview.erased)
-            erasedAny = true;
+        if (preview.erased) {
+            changedBounds = changedBounds.isNull()
+                                ? preview.bounds
+                                : changedBounds.united(preview.bounds);
+        }
     }
-    return erasedAny;
+}
+
+QRect PageView::erasePreviewViewportRect(const QRectF &bounds) const
+{
+    if (m_erasePage < 0 || m_erasePage >= m_pageRects.size() || bounds.isNull())
+        return {};
+
+    const QRect pageRect = pageRectInViewport(m_erasePage);
+    return QRectF(pageRect.topLeft()
+                      + QPointF(bounds.x() * m_scale, bounds.y() * m_scale),
+                  QSizeF(bounds.width() * m_scale, bounds.height() * m_scale))
+        .adjusted(-2, -2, 2, 2).toAlignedRect().intersected(pageRect);
 }
 
 void PageView::setDrawStyle(const DrawStyle &style)
@@ -2537,10 +2554,16 @@ void PageView::mousePressEvent(QMouseEvent *event)
                         }
                     }
                 }
-                if (updateErasePreview(point, point))
-                    viewport()->repaint(pageRectInViewport(page));
-                else
-                    viewport()->update();
+                QRectF changedBounds;
+                updateErasePreview(point, point, changedBounds);
+                const int radius = qMax(
+                    4, qRound(m_drawStyle.widthPoints * m_scale / 2.0)) + 2;
+                QRect dirtyRect = QRect(pos.x() - radius, pos.y() - radius,
+                                        radius * 2, radius * 2);
+                if (!changedBounds.isNull())
+                    dirtyRect = dirtyRect.united(
+                        erasePreviewViewportRect(changedBounds));
+                viewport()->update(dirtyRect);
             }
             return;
         }
@@ -2786,21 +2809,30 @@ void PageView::mouseMoveEvent(QMouseEvent *event)
     }
 
     if (m_drawTool && m_eraserActive) {
+        const QPoint previousCursorPos = m_eraserCursorPos;
         m_eraserCursorPos = pos;
+        const int radius = qMax(
+            4, qRound(m_drawStyle.widthPoints * m_scale / 2.0)) + 2;
+        QRect dirtyRect(previousCursorPos.x() - radius,
+                        previousCursorPos.y() - radius,
+                        radius * 2, radius * 2);
+        dirtyRect = dirtyRect.united(
+            QRect(pos.x() - radius, pos.y() - radius, radius * 2, radius * 2));
         if (m_erasing) {
             const QPointF point = pagePointFor(m_erasePage, pos);
             const QPointF previous = m_erasePoints.last();
             if (point != previous) {
                 m_erasePoints << point;
-                if (updateErasePreview(previous, point)) {
-                    viewport()->repaint(pageRectInViewport(m_erasePage));
-                    return;
-                }
+                QRectF changedBounds;
+                updateErasePreview(previous, point, changedBounds);
+                if (!changedBounds.isNull())
+                    dirtyRect = dirtyRect.united(
+                        erasePreviewViewportRect(changedBounds));
             }
         } else {
             m_erasePage = pageAtViewportPoint(pos);
         }
-        viewport()->update();
+        viewport()->update(dirtyRect);
         return;
     }
 

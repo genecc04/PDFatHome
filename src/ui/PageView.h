@@ -226,7 +226,9 @@ private:
                      int tileSize, qreal dpr, bool includeAnnotations);
     void drawTiledPage(QPainter &painter, int page, const QRect &target,
                        const QRect &exposed, qreal dpr);
-    bool updateErasePreview(const QPointF &start, const QPointF &end);
+    void updateErasePreview(const QPointF &start, const QPointF &end,
+                            QRectF &changedBounds);
+    QRect erasePreviewViewportRect(const QRectF &bounds) const;
     void drawSearchResults(QPainter &painter, int page, const QRect &pageRect,
                            const PdfEditor::SearchResult &current);
     void drawFormFieldOverlays(QPainter &painter, int page, const QRect &pageRect);
