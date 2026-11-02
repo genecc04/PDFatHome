@@ -28,6 +28,27 @@ class QPushButton;
 class SearchResultModel;
 class QTimer;
 
+struct RasterTileKey
+{
+    int page = -1;
+    int width = 0;
+    int height = 0;
+    int tileX = 0;
+    int tileY = 0;
+    bool annotated = true;
+
+    friend bool operator==(const RasterTileKey &a, const RasterTileKey &b) noexcept
+    {
+        return a.page == b.page && a.width == b.width && a.height == b.height
+               && a.tileX == b.tileX && a.tileY == b.tileY && a.annotated == b.annotated;
+    }
+    friend size_t qHash(const RasterTileKey &key, size_t seed = 0) noexcept
+    {
+        return qHashMulti(seed, key.page, key.width, key.height, key.tileX, key.tileY,
+                          key.annotated);
+    }
+};
+
 class PageView : public QAbstractScrollArea
 {
     Q_OBJECT
@@ -221,6 +242,11 @@ private:
         int page = -1;
         QList<QPolygonF> bounds;
         QString text;
+        // The range this part covers on its page. Parts far from the viewport
+        // are left unresolved until they are painted or copied.
+        QPointF start;
+        QPointF end;
+        bool resolved = true;
     };
 
     struct FormFieldOverlay {
@@ -299,6 +325,7 @@ private:
     void updateImageCursor(const QPoint &viewportPos);
 
     void updateSelection();
+    void resolveSelectionPart(SelectionPart &part);
     void extendSelection(const QPoint &viewportPos);
     void selectWordAt(int page, const QPointF &point);
     void selectTextAnnotation(int page, int annotationId, const QRectF &bounds,
@@ -333,6 +360,8 @@ private:
     double m_pendingZoomFactor = 1.0;
     double m_scale = 1.0;
     QVector<QSizeF> m_pageSizes;
+    double m_maxPageWidth = 1.0;
+    double m_maxPageHeight = 1.0;
     QVector<QSizeF> m_pageSizeHint;
     QVector<QRect> m_pageRects;
     QSize m_documentSize;
@@ -349,16 +378,16 @@ private:
 
     QCache<quint64, QPixmap> m_cache;
     QCache<quint64, QPixmap> m_baseCache;
-    QCache<QString, QPixmap> m_tileCache;
+    QCache<RasterTileKey, QPixmap> m_tileCache;
     QSet<quint64> m_failedPageKeys;
     QSet<quint64> m_failedBaseKeys;
     QSet<quint64> m_stalePageKeys;
     QSet<quint64> m_staleBaseKeys;
     QSet<quint64> m_pendingPageKeys;
     QSet<quint64> m_pendingBaseKeys;
-    QSet<QString> m_failedTileKeys;
-    QSet<QString> m_staleTileKeys;
-    QSet<QString> m_pendingTileKeys;
+    QSet<RasterTileKey> m_failedTileKeys;
+    QSet<RasterTileKey> m_staleTileKeys;
+    QSet<RasterTileKey> m_pendingTileKeys;
 
     // text tool
     bool m_textTool = false;

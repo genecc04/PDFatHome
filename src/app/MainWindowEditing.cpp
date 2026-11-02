@@ -88,19 +88,29 @@ namespace {
         return fileName;
     }
 
-    QImage trimSignatureImage(const QImage &image)
+    QImage trimSignatureImage(const QImage &source)
     {
-        QRect bounds;
+        const QImage image = source.convertToFormat(QImage::Format_ARGB32);
+        int minX = image.width();
+        int minY = image.height();
+        int maxX = -1;
+        int maxY = -1;
         for (int y = 0; y < image.height(); ++y) {
+            const QRgb *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
             for (int x = 0; x < image.width(); ++x) {
-                if (qAlpha(image.pixel(x, y)) != 0)
-                    bounds |= QRect(x, y, 1, 1);
+                if (qAlpha(line[x]) == 0)
+                    continue;
+                minX = qMin(minX, x);
+                maxX = qMax(maxX, x);
+                minY = qMin(minY, y);
+                maxY = qMax(maxY, y);
             }
         }
-        if (bounds.isEmpty())
+        if (maxX < 0)
             return {};
-        return image.copy(bounds.adjusted(-20, -20, 20, 20)
-                              .intersected(image.rect()));
+        const QRect bounds(QPoint(minX, minY), QPoint(maxX, maxY));
+        return source.copy(bounds.adjusted(-20, -20, 20, 20)
+                               .intersected(source.rect()));
     }
 
     QByteArray encodeImageForPdf(const QImage &source)
@@ -1176,13 +1186,17 @@ bool MainWindow::fillFormField(int page, const QPointF &point, PageView::FormFie
     }
 
     EditOperationGuard operation(this);
-    if (!m_editor->setFormFieldValue(page, field.widgetIndex, QString())) {
+    bool pageLocal = false;
+    if (!m_editor->setFormFieldValue(page, field.widgetIndex, QString(), &pageLocal)) {
         QMessageBox::warning(this, "Fill form failed", m_editor->lastError());
         reopenEditor(m_history.current());
         updateActions();
         return true;
     }
-    refreshAfterEdit(page, {}, m_view->pageSizes());
+    if (pageLocal)
+        refreshAfterPageEdit({ page }, page);
+    else
+        refreshAfterEdit(page, {}, m_view->pageSizes());
     return true;
 }
 
@@ -1191,12 +1205,17 @@ bool MainWindow::commitFormField(int page, int widgetIndex, const QString &value
     if (!m_editor)
         return false;
     EditOperationGuard operation(this);
-    if (!m_editor->setFormFieldValue(page, widgetIndex, value)) {
+    bool pageLocal = false;
+    if (!m_editor->setFormFieldValue(page, widgetIndex, value, &pageLocal)) {
         QMessageBox::warning(this, "Fill form failed", m_editor->lastError());
         reopenEditor(m_history.current());
         updateActions();
         return false;
     }
+    // Fields shared across widgets may change other pages, so those take the
+    // full reload.
+    if (pageLocal)
+        return refreshAfterPageEdit({ page }, page);
     return refreshAfterEdit(page, {}, m_view->pageSizes());
 }
 

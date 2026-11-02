@@ -13,6 +13,7 @@
 #include <QUrl>
 #include <functional>
 #include <memory>
+#include <vector>
 
 struct fz_context;
 struct pdf_document;
@@ -160,7 +161,8 @@ public:
     bool addImageStamp(int pageIndex, const QRectF &box, const QByteArray &imageData);
     bool formFieldsOnPage(int pageIndex, QVector<FormField> *fields);
     bool formFieldAt(int pageIndex, const QPointF &point, FormField *field);
-    bool setFormFieldValue(int pageIndex, int widgetIndex, const QString &value);
+    bool setFormFieldValue(int pageIndex, int widgetIndex, const QString &value,
+                           bool *pageLocal = nullptr);
     void close();
 
     QString lastError() const { return m_error; }
@@ -172,7 +174,7 @@ private:
 
     fz_context *m_ctx = nullptr;
     pdf_document *m_doc = nullptr;
-    std::unique_ptr<SelectionTextCache> m_selectionTextCache;
+    std::vector<std::unique_ptr<SelectionTextCache>> m_selectionTextCache;
     QString m_error;
     QString m_path;
     bool m_hasDigitalSignatures = false;

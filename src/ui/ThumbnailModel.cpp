@@ -50,6 +50,20 @@ void ThumbnailModel::setDocument(PdfEditor *document)
     endResetModel();
 }
 
+void ThumbnailModel::setDevicePixelRatio(qreal ratio)
+{
+    ratio = qBound(1.0, ratio, 4.0);
+    if (qFuzzyCompare(ratio, m_devicePixelRatio))
+        return;
+    m_devicePixelRatio = ratio;
+    // Keep roughly the same number of thumbnails cached at higher densities.
+    m_cache.setMaxCost(int(kThumbnailCacheKilobytes * ratio * ratio));
+    m_cache.clear();
+    invalidateRenders();
+    if (rowCount() > 0)
+        emit dataChanged(index(0), index(rowCount() - 1), { Qt::DecorationRole });
+}
+
 void ThumbnailModel::setRenderSource(const QString &path, const QString &password)
 {
     m_renderSourcePath = path;
@@ -150,34 +164,24 @@ void ThumbnailModel::dispatchRenders()
         const quint64 generation = m_renderGeneration;
         const QString path = m_renderSourcePath;
         const QString password = m_renderPassword;
+        const qreal dpr = m_devicePixelRatio;
 
         m_renderPool.start(QRunnable::create(
-            [this, page, generation, path, password]() {
+            [this, page, generation, path, password, dpr]() {
                 // One MuPDF document per worker thread; the pool has one thread.
                 thread_local MuPdfRenderCache renderer;
 
                 QImage thumbnail;
                 QString error;
                 if (renderer.open(path, password, &error)) {
-                    const QSizeF pts = renderer.pagePointSize(page, &error);
-                    if (pts.isEmpty()) {
+                    QImage rendered = renderer.renderThumbnail(
+                        page, QSizeF(kThumbWidth * dpr, kThumbHeight * dpr), &error);
+                    if (rendered.isNull()) {
                         if (error.isEmpty())
-                            error = QStringLiteral("Page has no size.");
+                            error = QStringLiteral("Renderer returned an empty image.");
                     } else {
-                        const qreal scale = qMin(kThumbWidth / pts.width(),
-                                                 kThumbHeight / pts.height());
-                        const QSize size(qMax(1, int(pts.width() * scale)),
-                                         qMax(1, int(pts.height() * scale)));
-
-                        const QImage rendered = renderer.render(page, size, true, &error);
-                        if (rendered.isNull()) {
-                            if (error.isEmpty())
-                                error = QStringLiteral("Renderer returned an empty image.");
-                        } else {
-                            // The page is already drawn on white, so this only
-                            // changes the pixel format.
-                            thumbnail = rendered.convertToFormat(QImage::Format_RGB32);
-                        }
+                        rendered.setDevicePixelRatio(dpr);
+                        thumbnail = std::move(rendered);
                     }
                 }
                 QMetaObject::invokeMethod(

@@ -9,6 +9,7 @@
 #include <QSaveFile>
 #include <QUuid>
 #include <vector>
+#include <algorithm>
 #include <cstring>
 #include <utility>
 #include <cmath>
@@ -34,6 +35,7 @@ extern "C" {
 namespace {
 
 constexpr size_t kEditorStoreBytes = 64u * 1024u * 1024u;
+constexpr size_t kSelectionTextPages = 4;
 
 }
 
@@ -899,16 +901,26 @@ void PdfEditor::close()
 
 void PdfEditor::clearSelectionTextCache()
 {
-    if (m_selectionTextCache && m_selectionTextCache->page && m_ctx)
-        fz_drop_stext_page(m_ctx, m_selectionTextCache->page);
-    m_selectionTextCache.reset();
+    if (m_ctx) {
+        for (const std::unique_ptr<SelectionTextCache> &entry : m_selectionTextCache) {
+            if (entry && entry->page)
+                fz_drop_stext_page(m_ctx, entry->page);
+        }
+    }
+    m_selectionTextCache.clear();
 }
 
+// Keeps a few recently used pages, most recent first, so a drag across several
+// pages does not re-extract them on every mouse move.
 bool PdfEditor::cacheSelectionTextPage(int pageIndex)
 {
-    if (m_selectionTextCache && m_selectionTextCache->page
-        && m_selectionTextCache->pageIndex == pageIndex)
-        return true;
+    for (size_t i = 0; i < m_selectionTextCache.size(); ++i) {
+        if (m_selectionTextCache[i]->pageIndex == pageIndex) {
+            std::rotate(m_selectionTextCache.begin(), m_selectionTextCache.begin() + i,
+                        m_selectionTextCache.begin() + i + 1);
+            return true;
+        }
+    }
 
     auto cache = std::make_unique<SelectionTextCache>();
     fz_page *page = nullptr;
@@ -937,10 +949,13 @@ bool PdfEditor::cacheSelectionTextPage(int pageIndex)
         return false;
     }
 
-    clearSelectionTextCache();
     cache->page = textPage;
     cache->pageIndex = pageIndex;
-    m_selectionTextCache = std::move(cache);
+    m_selectionTextCache.insert(m_selectionTextCache.begin(), std::move(cache));
+    while (m_selectionTextCache.size() > kSelectionTextPages) {
+        fz_drop_stext_page(m_ctx, m_selectionTextCache.back()->page);
+        m_selectionTextCache.pop_back();
+    }
     return true;
 }
 
@@ -1119,11 +1134,26 @@ QVector<QSizeF> PdfEditor::pageSizes()
     if (count < 0)
         return sizes;
     sizes.reserve(count);
-    for (int page = 0; page < count; ++page) {
-        const QSizeF size = pagePointSize(page);
-        if (size.isEmpty())
-            return {};
-        sizes.append(size);
+    // Read each box from the page dictionary; loading a full page would also
+    // parse annotations and widgets.
+    fz_try(m_ctx)
+    {
+        for (int page = 0; page < count; ++page) {
+            pdf_obj *pageObject = pdf_lookup_page_obj(m_ctx, m_doc, page);
+            fz_rect box = fz_empty_rect;
+            fz_matrix ctm = fz_identity;
+            pdf_page_obj_transform(m_ctx, pageObject, &box, &ctm);
+            box = fz_transform_rect(box, ctm);
+            const QSizeF size(box.x1 - box.x0, box.y1 - box.y0);
+            if (size.isEmpty())
+                fz_throw(m_ctx, FZ_ERROR_GENERIC, "Page has no size.");
+            sizes.append(size);
+        }
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return {};
     }
     return sizes;
 }
@@ -1322,6 +1352,8 @@ PdfEditor::TextSelection PdfEditor::selectText(int pageIndex, const QPointF &sta
     if (!cacheSelectionTextPage(pageIndex))
         return selection;
 
+    // The page just used is at the front of the cache.
+    fz_stext_page *const textPage = m_selectionTextCache.front()->page;
     char *text = nullptr;
     constexpr int kMaxSelectionQuads = 65536;
     static thread_local std::vector<fz_quad> quads;
@@ -1333,12 +1365,11 @@ PdfEditor::TextSelection PdfEditor::selectText(int pageIndex, const QPointF &sta
         fz_point a = fz_make_point(float(start.x()), float(start.y()));
         fz_point b = fz_make_point(float(end.x()), float(end.y()));
         if (snapToWords)
-            fz_snap_selection(m_ctx, m_selectionTextCache->page,
-                              &a, &b, FZ_SELECT_WORDS);
-        text = fz_copy_selection(m_ctx, m_selectionTextCache->page, a, b, 0);
+            fz_snap_selection(m_ctx, textPage, &a, &b, FZ_SELECT_WORDS);
+        text = fz_copy_selection(m_ctx, textPage, a, b, 0);
 
         const int count = fz_highlight_selection(
-            m_ctx, m_selectionTextCache->page, a, b, quads.data(), int(quads.size()));
+            m_ctx, textPage, a, b, quads.data(), int(quads.size()));
         selection.text = QString::fromUtf8(text ? text : "");
         selection.bounds.reserve(qMax(0, count));
         for (int i = 0; i < count; ++i)
@@ -2990,6 +3021,20 @@ bool PdfEditor::formFieldAt(int pageIndex, const QPointF &point, FormField *fiel
 
     *field = FormField();
 
+    bool hasWidgets = true;
+    fz_var(hasWidgets);
+    fz_try(m_ctx)
+    {
+        hasWidgets = pageHasWidgetAnnots(m_ctx, m_doc, pageIndex);
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return false;
+    }
+    if (!hasWidgets)
+        return true;
+
     pdf_page *page = nullptr;
     pdf_annot *matchedWidget = nullptr;
     pdf_obj *fieldObject = nullptr;
@@ -3111,9 +3156,12 @@ bool PdfEditor::formFieldAt(int pageIndex, const QPointF &point, FormField *fiel
     return succeeded != 0;
 }
 
-bool PdfEditor::setFormFieldValue(int pageIndex, int widgetIndex, const QString &value)
+bool PdfEditor::setFormFieldValue(int pageIndex, int widgetIndex, const QString &value,
+                                  bool *pageLocal)
 {
     m_error.clear();
+    if (pageLocal)
+        *pageLocal = false;
     if (!m_doc) {
         m_error = "No document is open.";
         return false;
@@ -3128,9 +3176,11 @@ bool PdfEditor::setFormFieldValue(int pageIndex, int widgetIndex, const QString 
     pdf_page *page = nullptr;
     int found = 0;
     int accepted = 0;
+    int localToPage = 0;
     fz_var(page);
     fz_var(found);
     fz_var(accepted);
+    fz_var(localToPage);
 
     fz_try(m_ctx)
     {
@@ -3145,6 +3195,11 @@ bool PdfEditor::setFormFieldValue(int pageIndex, int widgetIndex, const QString 
             if (pdf_widget_is_readonly(m_ctx, widget))
                 break;
 
+            // A widget with its own /T is a complete field. Without one it is a
+            // kid of a shared field (radio groups, repeated widgets), whose
+            // value can change on other pages too.
+            localToPage = pdf_widget_type(m_ctx, widget) != PDF_WIDGET_TYPE_RADIOBUTTON
+                          && pdf_dict_get(m_ctx, pdf_annot_obj(m_ctx, widget), PDF_NAME(T));
             switch (pdf_widget_type(m_ctx, widget)) {
             case PDF_WIDGET_TYPE_TEXT:
                 accepted = pdf_set_text_field_value(
@@ -3185,6 +3240,8 @@ bool PdfEditor::setFormFieldValue(int pageIndex, int widgetIndex, const QString 
         m_error = "The PDF rejected that value or the field is read-only.";
         return false;
     }
+    if (pageLocal)
+        *pageLocal = localToPage != 0;
     return true;
 }
 
@@ -3313,27 +3370,61 @@ QSizeF MuPdfRenderCache::pagePointSize(int page, QString *error)
     return QSizeF(width, height);
 }
 
+namespace {
+// MuPDF draws BGRA bytes straight into the QImage; that matches the in-memory
+// layout of Format_RGB32 on little-endian. The page is cleared to opaque white.
+fz_pixmap *newPixmapOverImage(fz_context *ctx, QImage &image, int width, int height)
+{
+    image = QImage(width, height, QImage::Format_RGB32);
+    if (image.isNull())
+        fz_throw(ctx, FZ_ERROR_GENERIC, "Could not allocate the page image.");
+    return fz_new_pixmap_with_data(ctx, fz_device_bgr(ctx), width, height, nullptr, 1,
+                                   int(image.bytesPerLine()), image.bits());
+}
+}
+
 QImage MuPdfRenderCache::render(int page, const QSize &size, bool annotations,
                                 QString *error)
+{
+    if (size.width() <= 0 || size.height() <= 0) {
+        *error = QStringLiteral("The requested page size is empty.");
+        return QImage();
+    }
+    return renderPage(page, size, QSizeF(), annotations, error);
+}
+
+QImage MuPdfRenderCache::renderThumbnail(int page, const QSizeF &maxSize,
+                                         QString *error)
+{
+    if (maxSize.width() <= 0.0 || maxSize.height() <= 0.0) {
+        *error = QStringLiteral("The requested page size is empty.");
+        return QImage();
+    }
+    return renderPage(page, QSize(), maxSize, true, error);
+}
+
+QImage MuPdfRenderCache::renderPage(int page, const QSize &requestedSize,
+                                    const QSizeF &fitWithin, bool annotations,
+                                    QString *error)
 {
     if (!m_doc || !m_ctx) {
         *error = QStringLiteral("No document is open for background rendering.");
         return QImage();
     }
-    if (size.width() <= 0 || size.height() <= 0) {
-        *error = QStringLiteral("The requested page size is empty.");
-        return QImage();
-    }
 
-    const int width = size.width();
-    const int height = size.height();
+    int width = requestedSize.width();
+    int height = requestedSize.height();
 
+    QImage image;
     fz_page *mupdfPage = nullptr;
     fz_pixmap *pixmap = nullptr;
     fz_device *device = nullptr;
     fz_var(mupdfPage);
     fz_var(pixmap);
     fz_var(device);
+    fz_var(image);
+    fz_var(width);
+    fz_var(height);
 
     fz_try(m_ctx)
     {
@@ -3344,12 +3435,16 @@ QImage MuPdfRenderCache::render(int page, const QSize &size, bool annotations,
         if (pageWidth <= 0.0f || pageHeight <= 0.0f)
             fz_throw(m_ctx, FZ_ERROR_GENERIC, "Page has no size.");
 
+        if (width <= 0 || height <= 0) {
+            const qreal scale = qMin(fitWithin.width() / pageWidth,
+                                     fitWithin.height() / pageHeight);
+            width = qMax(1, int(pageWidth * scale));
+            height = qMax(1, int(pageHeight * scale));
+        }
         fz_matrix transform = fz_translate(-bounds.x0, -bounds.y0);
         transform = fz_post_scale(transform, width / pageWidth, height / pageHeight);
 
-        pixmap = fz_new_pixmap_with_bbox(m_ctx, fz_device_bgr(m_ctx),
-                                         fz_make_irect(0, 0, width, height),
-                                         nullptr, 0);
+        pixmap = newPixmapOverImage(m_ctx, image, width, height);
         fz_clear_pixmap_with_value(m_ctx, pixmap, 0xff);
 
         device = fz_new_draw_device(m_ctx, fz_identity, pixmap);
@@ -3365,19 +3460,15 @@ QImage MuPdfRenderCache::render(int page, const QSize &size, bool annotations,
             fz_drop_device(m_ctx, device);
         if (mupdfPage)
             fz_drop_page(m_ctx, mupdfPage);
+        if (pixmap)
+            fz_drop_pixmap(m_ctx, pixmap);
     }
     fz_catch(m_ctx)
     {
-        if (pixmap)
-            fz_drop_pixmap(m_ctx, pixmap);
         *error = QString::fromUtf8(fz_caught_message(m_ctx));
         return QImage();
     }
 
-    QImage wrapper(fz_pixmap_samples(m_ctx, pixmap), width, height,
-                   int(fz_pixmap_stride(m_ctx, pixmap)), QImage::Format_BGR888);
-    QImage image = wrapper.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-    fz_drop_pixmap(m_ctx, pixmap);
     return image;
 }
 
@@ -3397,12 +3488,14 @@ QImage MuPdfRenderCache::renderRegion(int page, const QRectF &pageRegion,
 
     const int width = size.width();
     const int height = size.height();
+    QImage image;
     fz_page *mupdfPage = nullptr;
     fz_pixmap *pixmap = nullptr;
     fz_device *device = nullptr;
     fz_var(mupdfPage);
     fz_var(pixmap);
     fz_var(device);
+    fz_var(image);
 
     fz_try(m_ctx)
     {
@@ -3424,9 +3517,7 @@ QImage MuPdfRenderCache::renderRegion(int page, const QRectF &pageRegion,
         transform = fz_post_scale(transform, width / (right - left),
                                   height / (bottom - top));
 
-        pixmap = fz_new_pixmap_with_bbox(m_ctx, fz_device_bgr(m_ctx),
-                                         fz_make_irect(0, 0, width, height),
-                                         nullptr, 0);
+        pixmap = newPixmapOverImage(m_ctx, image, width, height);
         fz_clear_pixmap_with_value(m_ctx, pixmap, 0xff);
 
         device = fz_new_draw_device(m_ctx, fz_identity, pixmap);
@@ -3442,18 +3533,14 @@ QImage MuPdfRenderCache::renderRegion(int page, const QRectF &pageRegion,
             fz_drop_device(m_ctx, device);
         if (mupdfPage)
             fz_drop_page(m_ctx, mupdfPage);
+        if (pixmap)
+            fz_drop_pixmap(m_ctx, pixmap);
     }
     fz_catch(m_ctx)
     {
-        if (pixmap)
-            fz_drop_pixmap(m_ctx, pixmap);
         *error = QString::fromUtf8(fz_caught_message(m_ctx));
         return QImage();
     }
 
-    QImage wrapper(fz_pixmap_samples(m_ctx, pixmap), width, height,
-                   int(fz_pixmap_stride(m_ctx, pixmap)), QImage::Format_BGR888);
-    QImage image = wrapper.convertToFormat(QImage::Format_ARGB32_Premultiplied);
-    fz_drop_pixmap(m_ctx, pixmap);
     return image;
 }

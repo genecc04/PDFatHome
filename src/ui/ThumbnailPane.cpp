@@ -110,6 +110,20 @@ void ThumbnailPane::resizeEvent(QResizeEvent *event)
     updateVisiblePageRange();
 }
 
+bool ThumbnailPane::event(QEvent *event)
+{
+    const bool handled = QListView::event(event);
+    if (event->type() == QEvent::DevicePixelRatioChange)
+        m_model->setDevicePixelRatio(devicePixelRatioF());
+    return handled;
+}
+
+void ThumbnailPane::showEvent(QShowEvent *event)
+{
+    QListView::showEvent(event);
+    m_model->setDevicePixelRatio(devicePixelRatioF());
+}
+
 void ThumbnailPane::scrollContentsBy(int dx, int dy)
 {
     QListView::scrollContentsBy(dx, dy);
@@ -136,11 +150,14 @@ QList<int> ThumbnailPane::selectedPages() const
 void ThumbnailPane::selectPages(const QList<int> &pages)
 {
     selectionModel()->clearSelection();
+    QItemSelection selection;
     for (int page : pages) {
         const QModelIndex index = m_model->index(page);
         if (index.isValid())
-            selectionModel()->select(index, QItemSelectionModel::Select);
+            selection.select(index, index);
     }
+    if (!selection.isEmpty())
+        selectionModel()->select(selection, QItemSelectionModel::Select);
 }
 
 void ThumbnailPane::startDrag(Qt::DropActions supportedActions)

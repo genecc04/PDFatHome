@@ -24,10 +24,13 @@ public:
     bool open(const QString &path, const QString &password, QString *error);
     QSizeF pagePointSize(int page, QString *error);
     QImage render(int page, const QSize &size, bool annotations, QString *error);
+    QImage renderThumbnail(int page, const QSizeF &maxSize, QString *error);
     QImage renderRegion(int page, const QRectF &pageRegion, const QSize &size,
                        bool annotations, QString *error);
 
 private:
+    QImage renderPage(int page, const QSize &requestedSize, const QSizeF &fitWithin,
+                      bool annotations, QString *error);
     void closeDocument();
 
     fz_context *m_ctx = nullptr;

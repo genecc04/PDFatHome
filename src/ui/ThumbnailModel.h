@@ -23,6 +23,7 @@ public:
     explicit ThumbnailModel(QObject *parent = nullptr);
 
     void setDocument(PdfEditor *document);
+    void setDevicePixelRatio(qreal ratio);
     void invalidatePageRenders(const QList<int> &changedPages = {});
     void setVisiblePageRange(int first, int last, int priorityPage);
 
@@ -43,6 +44,7 @@ private:
     QString m_renderSourcePath;
     QString m_renderPassword;
     quint64 m_renderGeneration = 0;
+    qreal m_devicePixelRatio = 1.0;
     int m_inFlight = 0;
 
     PdfEditor *m_document = nullptr;

@@ -3,7 +3,9 @@
 #include <QListView>
 
 class QDropEvent;
+class QEvent;
 class QResizeEvent;
+class QShowEvent;
 class PdfEditor;
 class ThumbnailModel;
 
@@ -27,6 +29,8 @@ signals:
     void pageMoveRequested(int from, int to);
 
 protected:
+    bool event(QEvent *event) override;
+    void showEvent(QShowEvent *event) override;
     void dropEvent(QDropEvent *event) override;
     void startDrag(Qt::DropActions supportedActions) override;
     void resizeEvent(QResizeEvent *event) override;
