@@ -8,6 +8,7 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
 find_package(unofficial-libmupdf CONFIG REQUIRED)
+find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 add_executable(PdfApp WIN32
     src/app/main.cpp
@@ -56,4 +57,5 @@ set_target_properties(PdfApp PROPERTIES OUTPUT_NAME "PDF@home")
 target_link_libraries(PdfApp PRIVATE
     Qt6::Widgets
     unofficial::libmupdf::libmupdf
+    OpenSSL::Crypto
 )

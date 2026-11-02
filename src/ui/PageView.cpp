@@ -242,6 +242,9 @@ void PageView::setLoading(bool loading)
         m_redactionDrawing = false;
         m_redactionPage = -1;
         m_redactionPreview = QRectF();
+        m_signatureDrawing = false;
+        m_signaturePage = -1;
+        m_signaturePreview = QRectF();
         m_drawing = false;
         m_activeStroke = Stroke();
         m_erasing = false;
@@ -435,6 +438,7 @@ void PageView::onDocumentChanged(bool preserveRasterPreviews)
     m_pendingTextAnnotationPreview = TextAnnotationPreview();
     m_pendingImageStampPreview = ImageStampPreview();
     setRedactionToolActive(false);
+    setSignatureToolActive(false);
     clearRedactionAreas();
 
     const bool hadStrokes = !m_strokes.isEmpty();
@@ -1827,6 +1831,19 @@ void PageView::paintEvent(QPaintEvent *event)
             && !m_redactionPreview.isEmpty()) {
             drawRedactionPreview(m_redactionPreview);
         }
+        if (m_signatureDrawing && m_signaturePage == page
+            && !m_signaturePreview.isEmpty()) {
+            const QRectF pixelBounds(
+                target.x() + m_signaturePreview.x() * m_scale,
+                target.y() + m_signaturePreview.y() * m_scale,
+                m_signaturePreview.width() * m_scale,
+                m_signaturePreview.height() * m_scale);
+            painter.save();
+            painter.setPen(QPen(QColor(0, 76, 153), 2, Qt::DashLine));
+            painter.setBrush(QColor(0, 102, 204, 40));
+            painter.drawRect(pixelBounds);
+            painter.restore();
+        }
 
         painter.restore();
     }
@@ -1937,6 +1954,10 @@ void PageView::keyPressEvent(QKeyEvent *event)
     }
     if (event->key() == Qt::Key_Escape && m_redactionTool) {
         setRedactionToolActive(false);
+        return;
+    }
+    if (event->key() == Qt::Key_Escape && m_signatureTool) {
+        setSignatureToolActive(false);
         return;
     }
     if (event->key() == Qt::Key_Delete && m_selectedTextAnnotationPage >= 0) {
@@ -2083,7 +2104,7 @@ void PageView::contextMenuEvent(QContextMenuEvent *event)
     if (m_loading)
         return;
 
-    if (m_textTool || m_drawTool || m_redactionTool || m_editor
+    if (m_textTool || m_drawTool || m_redactionTool || m_signatureTool || m_editor
         || m_imageAwaiting || m_imageActive)
         return;
 
@@ -2180,6 +2201,28 @@ void PageView::setRedactionToolActive(bool active)
                                  : (m_textTool ? Qt::IBeamCursor : Qt::ArrowCursor));
     viewport()->update();
     emit redactionToolChanged(active);
+}
+
+void PageView::setSignatureToolActive(bool active)
+{
+    if (m_signatureTool == active)
+        return;
+
+    m_signatureTool = active;
+    m_signatureDrawing = false;
+    m_signaturePage = -1;
+    m_signaturePreview = QRectF();
+    if (active) {
+        setTextToolActive(false);
+        setDrawToolActive(false);
+        setRedactionToolActive(false);
+        cancelImagePlacement();
+        clearSelection();
+    }
+    viewport()->setCursor(active ? Qt::CrossCursor
+                                 : (m_textTool ? Qt::IBeamCursor : Qt::ArrowCursor));
+    viewport()->update();
+    emit signatureToolChanged(active);
 }
 
 void PageView::clearRedactionAreas()
@@ -2834,6 +2877,21 @@ void PageView::mousePressEvent(QMouseEvent *event)
         return;
     }
 
+    if (m_signatureTool) {
+        if (event->button() == Qt::LeftButton) {
+            const int page = pageAtViewportPoint(pos);
+            if (page >= 0) {
+                m_signaturePage = page;
+                m_signatureStart = pagePointFor(page, pos);
+                m_signaturePreview = QRectF(m_signatureStart, QSizeF());
+                m_signatureDrawing = true;
+                viewport()->update();
+            }
+        }
+        event->accept();
+        return;
+    }
+
     if (m_imageActive) {
         if (event->button() != Qt::LeftButton)
             return;
@@ -3141,6 +3199,18 @@ void PageView::mouseMoveEvent(QMouseEvent *event)
         }
         return;
     }
+    if (m_signatureTool) {
+        if (m_signatureDrawing && m_signaturePage >= 0
+            && m_signaturePage < m_pageSizes.size()) {
+            QPointF end = pagePointFor(m_signaturePage, pos);
+            const QSizeF pageSize = m_pageSizes.at(m_signaturePage);
+            end.setX(qBound(0.0, end.x(), pageSize.width()));
+            end.setY(qBound(0.0, end.y(), pageSize.height()));
+            m_signaturePreview = QRectF(m_signatureStart, end).normalized();
+            viewport()->update();
+        }
+        return;
+    }
 
     const PdfEditor::Link hoveredLink = linkAtViewportPoint(pos);
     setHoveredLink(hoveredLink.url);
@@ -3391,6 +3461,29 @@ void PageView::mouseReleaseEvent(QMouseEvent *event)
             m_redactionPage = -1;
             m_redactionPreview = QRectF();
             viewport()->update();
+        }
+        event->accept();
+        return;
+    }
+
+    if (m_signatureTool) {
+        if (m_signatureDrawing && event->button() == Qt::LeftButton
+            && m_signaturePage >= 0 && m_signaturePage < m_pageSizes.size()) {
+            QPointF end = pagePointFor(m_signaturePage,
+                                       event->position().toPoint());
+            const QSizeF pageSize = m_pageSizes.at(m_signaturePage);
+            end.setX(qBound(0.0, end.x(), pageSize.width()));
+            end.setY(qBound(0.0, end.y(), pageSize.height()));
+            const QRectF bounds = QRectF(m_signatureStart, end).normalized();
+            const int page = m_signaturePage;
+            m_signatureDrawing = false;
+            m_signaturePage = -1;
+            m_signaturePreview = QRectF();
+            viewport()->update();
+            if (bounds.width() >= 24.0 && bounds.height() >= 18.0) {
+                setSignatureToolActive(false);
+                emit signaturePlacementRequested(page, bounds);
+            }
         }
         event->accept();
         return;

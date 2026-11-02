@@ -19,6 +19,7 @@
 #include <QSettings>
 #include <QSpinBox>
 #include <QStatusBar>
+#include <QToolButton>
 #include <QTimer>
 
 MainWindow::EditOperationGuard::EditOperationGuard(MainWindow *window)
@@ -46,6 +47,7 @@ MainWindow::MainWindow(QWidget *parent)
     setupImageToolbar();
     setupTextToolbar();
     setupDrawToolbar();
+    setupSignatureToolbar();
     updateActions();
 
     setAcceptDrops(true);
@@ -134,8 +136,9 @@ void MainWindow::updateTitle()
 
 void MainWindow::updateActions()
 {
+    const bool signedDocument = m_editor && m_editor->hasDigitalSignatures();
     const bool editable = (m_editor != nullptr) && !m_documentLoadPending
-                          && !m_documentOperationPending;
+                          && !m_documentOperationPending && !signedDocument;
 
     m_saveAction->setEnabled(editable && isDocumentModified());
     m_saveAsAction->setEnabled(editable);
@@ -167,10 +170,29 @@ void MainWindow::updateActions()
     m_deleteImageAction->setEnabled(editable && m_view->hasSelectedImageStamp());
 
     m_drawAction->setEnabled(editable);
+    m_esignButton->setEnabled(editable);
+    m_esignTypeAction->setEnabled(editable);
+    m_esignDrawAction->setEnabled(editable);
+    m_esignUploadAction->setEnabled(editable);
+    m_manageESignaturesAction->setEnabled(editable);
     if ((!m_editor || m_documentLoadPending) && m_drawAction->isChecked())
         m_drawAction->setChecked(false);
     if ((!m_editor || m_documentLoadPending) && m_redactAction->isChecked())
         m_redactAction->setChecked(false);
+    m_signAction->setEnabled(editable);
+    m_verifySignaturesAction->setEnabled(
+        m_editor != nullptr && !m_documentLoadPending && !m_documentOperationPending);
+    if ((!m_editor || m_documentLoadPending || signedDocument)
+        && m_signAction->isChecked())
+        m_signAction->setChecked(false);
+    if (signedDocument) {
+        if (m_addTextAction->isChecked())
+            m_addTextAction->setChecked(false);
+        if (m_drawAction->isChecked())
+            m_drawAction->setChecked(false);
+        if (m_redactAction->isChecked())
+            m_redactAction->setChecked(false);
+    }
 }
 
 void MainWindow::setBusyCursor(bool busy)

@@ -9,44 +9,23 @@ web links embedded in a PDF in your default browser after you confirm.
 ## Features
 
 **Reading**
-- Open PDFs, including password-protected ones. Drag a file onto the window, use
-  File > Open Recent, or open one from the command line
-- Page navigation and zoom: zoom in and out, fit width, fit page, Ctrl + mouse wheel.
-- Page thumbnails, drawn on demand so large files open quickly
-- Full-text search with highlighted results
-- Bookmarks / table of contents
-- Select text with the mouse and copy it, across pages
-- Remembers your window size and panel layout
+- Open PDFs, including password-protected files; navigate pages, zoom, search, and browse bookmarks
+- Select and copy text; customize panels and window layout
 
 **Page editing**
-- Rotate or delete pages. Select several thumbnails with Shift + click or Ctrl + click
-- Reorder pages by dragging thumbnails
-- Extract a page range into a new PDF
-- Insert pages from another PDF (this also merges documents)
-- Undo and redo (up to 20 steps)
-- Save in place (Ctrl+S) or save a copy (Save As). Saving replaces the file safely,
-  so a failed save never costs you the original
-- Create a losslessly optimized PDF copy by compressing streams and removing unused
-  or duplicate objects; images are not downsampled
-- Mark rectangular redaction areas and apply them to a separate PDF copy. Intersecting
-  text is removed, and intersecting images or vector drawings may be removed in full;
-  the original file is left unchanged
-- Export selected page ranges as 150-DPI PNG images or SVG files; multi-page
-  exports are numbered
+- Rotate, reorder, extract, insert, or delete pages; undo and redo edits
+- Save changes or a copy, and create a losslessly optimized PDF
+- Redact selected content in a separate copy
+- Export pages as PNG or SVG
 
 **Marking up and filling out**
-- Fill out forms: type text into the blanks, draw check marks, and add your signature
-- Add editable PDF text annotations with size and color controls.
-- Draw with a pen, a highlighter or white-out, with adjustable size, color and opacity.
-- Highlight every occurrence of a word or phrase
-- Add images and signatures. Pick a file and click the page. Use Crop in the image
-  toolbar and drag a corner handle inward to crop. Newly added images can be selected,
-  moved, proportionally resized from a corner, or deleted with Delete.
-  Select Cancel or press Esc to stop placing the image
+- Fill PDF forms; add and edit text, highlights, drawings, and images
+- Create visual E-signatures by typing, drawing, or uploading; save and manage them locally
+- Move, resize, crop, or delete added images and signatures
 
 **Security**
-- Add, change or remove a password (AES-256)
-- Preview website link URLs in the status bar; open links only after confirming
+- Set or remove AES-256 passwords; digitally sign with an RSA certificate
+- Review PDF links before opening them in your browser
 
 ## Download
 
@@ -90,6 +69,16 @@ which most computers already have.
   metadata, attachments, bookmarks, form values, or unmarked content. The original
   remains unchanged. Inspect the output and verify that sensitive content is gone
   before sharing it.
+- **Digital signatures use an RSA certificate in a PFX/P12 file.** The app can create
+  a password-protected self-signed certificate for convenience (minimum 12-character
+  password), but recipients may see signatures made with it as untrusted until they trust
+  that certificate. Keep the `.p12` file and password safe. The app does not provide a
+  trusted timestamp or a certificate trust assessment. Trust is determined by the PDF
+  reader and the recipient's certificate store. Editing or rewriting a signed PDF can
+  invalidate its signature.
+- Use **View > Verify digital signatures** to check signature integrity and detect
+  changes since signing. PDF@home does not verify certificate trust chains; use a trusted
+  PDF reader for that assessment.
 - Added text uses only the standard PDF fonts Helvetica, Times, and Courier for
   cross-viewer compatibility.
 - Scanned PDFs have no text to select or search (there is no OCR).
@@ -106,10 +95,10 @@ The development build was tested with Qt 6.8.0 for MSVC 2022 and MuPDF 1.26.10
 from vcpkg. QMake reports version 3.1 with that Qt installation; this project uses
 CMake to configure and build.
 
-Install MuPDF with vcpkg:
+Install MuPDF and OpenSSL with vcpkg:
 
 ```
-vcpkg install libmupdf:x64-windows-static-md --host-triplet=x64-windows-static-md
+vcpkg install libmupdf openssl --triplet=x64-windows-static-md --host-triplet=x64-windows-static-md
 ```
 
 Then configure and build, adjusting the paths to your machine:

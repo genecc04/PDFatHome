@@ -120,6 +120,7 @@ public:
     void setDrawToolActive(bool active);
     void setDrawStyle(const DrawStyle &style);
     void setRedactionToolActive(bool active);
+    void setSignatureToolActive(bool active);
     bool hasRedactionAreas() const { return !m_redactionAreas.isEmpty(); }
     QVector<PdfEditor::RedactionArea> redactionAreas() const { return m_redactionAreas; }
     void clearRedactionAreas();
@@ -172,6 +173,8 @@ signals:
     void imageCropModeChanged(bool active);
     void redactionAreasChanged(int count);
     void redactionToolChanged(bool active);
+    void signaturePlacementRequested(int page, const QRectF &bounds);
+    void signatureToolChanged(bool active);
     void textSelected();
     void openRequested();
     void externalLinkRequested(const QUrl &url);
@@ -397,6 +400,12 @@ private:
     QPointF m_redactionStart;
     QRectF m_redactionPreview;
     QVector<PdfEditor::RedactionArea> m_redactionAreas;
+
+    bool m_signatureTool = false;
+    bool m_signatureDrawing = false;
+    int m_signaturePage = -1;
+    QPointF m_signatureStart;
+    QRectF m_signaturePreview;
 
     // image placement
     QImage m_pendingImage;

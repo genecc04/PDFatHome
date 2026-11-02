@@ -22,6 +22,7 @@ class QDropEvent;
 class QLabel;
 class QMenu;
 class QSpinBox;
+class QToolButton;
 class BookmarkPane;
 class SearchPane;
 class ThumbnailPane;
@@ -76,6 +77,14 @@ private:
     bool saveAs();
     void optimizePdf();
     void applyRedactions();
+    void signDocument(int page, const QRectF &bounds);
+    void showDigitalSignatures();
+    void addTypedESignature();
+    void drawESignature();
+    void uploadESignature();
+    void manageESignatures();
+    void saveESignature(const QImage &image, const QString &name);
+    void beginESignaturePlacement(const QImage &image);
     void goToPage(int page);
     bool showFile(const QString &path, int page, bool reportErrors = true,
                   bool preserveRasterPreviews = false, bool forceReload = false);
@@ -115,6 +124,7 @@ private:
     bool refreshAfterPageEdit(const QList<int> &changedPages, int page);
     QList<int> targetPages() const;
     void setupDrawToolbar();
+    void setupSignatureToolbar();
     void placeStrokes(const QVector<PageView::Stroke> &strokes);
     void eraseInk(int page, const QVector<QPointF> &path, double radius);
     void addImage();
@@ -160,6 +170,8 @@ private:
     QAction *m_saveAsAction = nullptr;
     QAction *m_optimizeAction = nullptr;
     QAction *m_redactAction = nullptr;
+    QAction *m_signAction = nullptr;
+    QAction *m_verifySignaturesAction = nullptr;
     QAction *m_applyRedactionsAction = nullptr;
     QAction *m_clearRedactionsAction = nullptr;
     QAction *m_extractAction = nullptr;
@@ -177,6 +189,11 @@ private:
     QAction *m_deletePageAction = nullptr;
     QAction *m_drawAction = nullptr;
     QAction *m_addImageAction = nullptr;
+    QAction *m_esignTypeAction = nullptr;
+    QAction *m_esignDrawAction = nullptr;
+    QAction *m_esignUploadAction = nullptr;
+    QAction *m_manageESignaturesAction = nullptr;
+    QToolButton *m_esignButton = nullptr;
     QAction *m_cropImageAction = nullptr;
     QAction *m_cancelImageAction = nullptr;
     QString m_newPassword;

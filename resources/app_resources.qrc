@@ -17,5 +17,9 @@
         <file alias="crop.png">icons/crop.png</file>
         <file alias="cancelimage.png">icons/cancelimage.png</file>
         <file alias="draw.png">icons/draw.png</file>
+        <file alias="applyredaction.png">icons/applyredaction.png</file>
+        <file alias="markredaction.png">icons/markredaction.png</file>
+        <file alias="esign.png">icons/esign.png</file>
+        <file alias="deleteimage.png">icons/deleteimage.png</file>
     </qresource>
 </RCC>

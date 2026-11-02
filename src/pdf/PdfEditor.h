@@ -82,6 +82,13 @@ public:
         QRectF bounds;
     };
 
+    struct DigitalSignatureInfo {
+        QString signerName;
+        bool cryptographicallyValid = false;
+        bool documentChangedSinceSigning = false;
+        bool selfSignedCertificate = false;
+    };
+
     PdfEditor();
     ~PdfEditor();
 
@@ -106,6 +113,8 @@ public:
 
     bool open(const QString &path, const QString &password = QString());
     QString filePath() const { return m_path; }
+    bool hasDigitalSignatures() const { return m_hasDigitalSignatures; }
+    QVector<DigitalSignatureInfo> digitalSignatures();
     int pageCount();
     QSizeF pagePointSize(int pageIndex);
     QVector<QSizeF> pageSizes();
@@ -121,6 +130,12 @@ public:
     bool saveAs(const QString &path, bool removeUnused = false,
                 Encryption encryption = Encryption::Keep,
                 const QString &password = QString());
+    static bool createSelfSignedCertificate(const QString &path,
+                                            const QString &commonName,
+                                            const QString &password,
+                                            QString *error);
+    bool signAs(const QString &path, int pageIndex, const QRectF &bounds,
+                const QString &pfxPath, const QString &pfxPassword);
     bool optimizeAs(const QString &path, Encryption encryption = Encryption::Keep,
                     const QString &password = QString());
     bool redactAs(const QString &path, const QVector<RedactionArea> &areas,
@@ -160,4 +175,5 @@ private:
     std::unique_ptr<SelectionTextCache> m_selectionTextCache;
     QString m_error;
     QString m_path;
+    bool m_hasDigitalSignatures = false;
 };

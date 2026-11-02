@@ -18,6 +18,7 @@
 #include <QMessageBox>
 #include <QMetaObject>
 #include <QMimeData>
+#include <QPushButton>
 #include <QRunnable>
 #include <QSettings>
 #include <QSignalBlocker>
@@ -78,6 +79,16 @@ namespace {
     bool replaceFile(const QString &source, const QString &target, QString *message)
     {
         const QFileInfo targetInfo(target);
+        if (!targetInfo.exists()) {
+            QFile signedCopy(source);
+            if (!signedCopy.rename(target)) {
+                *message = "Could not install the signed PDF ("
+                           + signedCopy.errorString() + ").";
+                return false;
+            }
+            return true;
+        }
+
         const QString backupPattern = QDir(targetInfo.absolutePath()).filePath(
             targetInfo.fileName() + ".pdfapp-backup-XXXXXX");
         QTemporaryDir backupDirectory(backupPattern);
@@ -311,6 +322,11 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
                 + (editorError.isEmpty()
                        ? QStringLiteral("No error details were provided.")
                        : editorError));
+    } else if (m_editor->hasDigitalSignatures()) {
+        statusBar()->showMessage(
+            "This PDF contains a digital signature. Editing is disabled in this app to "
+            "preserve the signed document.",
+            12000);
     }
 }
 
@@ -638,6 +654,257 @@ void MainWindow::applyRedactions()
             + ". Opening it for inspection; the original PDF was not changed.",
         10000);
     loadDocument(QFileInfo(dest).absoluteFilePath(), outputPassword, page);
+}
+
+void MainWindow::signDocument(int page, const QRectF &bounds)
+{
+    m_view->commitPendingEdits();
+    if (!m_editor || m_documentLoadPending || m_documentOperationPending
+        || m_editor->hasDigitalSignatures())
+        return;
+    if (m_passwordChange != PasswordChange::None) {
+        QMessageBox::warning(
+            this, "Digital signature",
+            "Save or cancel the pending password change before signing the PDF.");
+        return;
+    }
+    if (m_view->hasRedactionAreas()) {
+        QMessageBox::warning(
+            this, "Digital signature",
+            "Apply or clear the pending redaction areas before signing. Unapplied redaction "
+            "marks are not part of the signed PDF.");
+        return;
+    }
+
+    const auto answer = QMessageBox::warning(
+        this, "Digitally sign PDF",
+        "A digital signature protects the signed PDF from undetected changes. Recipients "
+        "must trust the signing certificate for the signature to appear trusted; a "
+        "self-signed certificate may be reported as untrusted. Editing the signed copy "
+        "afterward can invalidate the signature. The original file will remain unchanged.",
+        QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+    if (answer != QMessageBox::Yes)
+        return;
+
+    QMessageBox certificateChoice(this);
+    certificateChoice.setWindowTitle("Signing certificate");
+    certificateChoice.setIcon(QMessageBox::Question);
+    certificateChoice.setText(
+        "Choose a signing certificate. A certificate created here is self-signed "
+        "and may appear as untrusted to recipients.");
+    QPushButton *createCertificateButton =
+        certificateChoice.addButton("Create a certificate", QMessageBox::ActionRole);
+    QPushButton *useCertificateButton =
+        certificateChoice.addButton("Use an existing certificate", QMessageBox::ActionRole);
+    certificateChoice.addButton(QMessageBox::Cancel);
+    certificateChoice.setDefaultButton(QMessageBox::Cancel);
+    certificateChoice.exec();
+    const QAbstractButton *chosenButton = certificateChoice.clickedButton();
+
+    QString pfxPath;
+    QString pfxPassword;
+    if (chosenButton == createCertificateButton) {
+        bool nameAccepted = false;
+        const QString commonName = QInputDialog::getText(
+            this, "Create signing certificate", "Name shown as the signer:",
+            QLineEdit::Normal, QString(), &nameAccepted).trimmed();
+        if (!nameAccepted || commonName.isEmpty())
+            return;
+
+        bool passwordAccepted = false;
+        pfxPassword = QInputDialog::getText(
+            this, "Protect signing certificate",
+            "Create a password (at least 12 characters). You will need it whenever "
+            "you use this certificate:",
+            QLineEdit::Password, QString(), &passwordAccepted);
+        if (!passwordAccepted) {
+            pfxPassword.fill(QChar(0));
+            return;
+        }
+
+        bool confirmationAccepted = false;
+        QString confirmation = QInputDialog::getText(
+            this, "Confirm certificate password", "Enter the password again:",
+            QLineEdit::Password, QString(), &confirmationAccepted);
+        if (!confirmationAccepted) {
+            pfxPassword.fill(QChar(0));
+            confirmation.fill(QChar(0));
+            return;
+        }
+        if (pfxPassword.size() < 12 || pfxPassword != confirmation) {
+            pfxPassword.fill(QChar(0));
+            confirmation.fill(QChar(0));
+            QMessageBox::warning(
+                this, "Create signing certificate",
+                "The passwords must match and contain at least 12 characters.");
+            return;
+        }
+        confirmation.fill(QChar(0));
+
+        pfxPath = QFileDialog::getSaveFileName(
+            this, "Save signing certificate", "PDFhome-signing-certificate.p12",
+            "PKCS#12 certificates (*.p12)");
+        if (pfxPath.isEmpty()) {
+            pfxPassword.fill(QChar(0));
+            return;
+        }
+        if (QFileInfo(pfxPath).suffix().isEmpty())
+            pfxPath += ".p12";
+
+        QString certificateError;
+        if (!PdfEditor::createSelfSignedCertificate(
+                pfxPath, commonName, pfxPassword, &certificateError)) {
+            pfxPassword.fill(QChar(0));
+            QMessageBox::warning(
+                this, "Create signing certificate",
+                certificateError.isEmpty()
+                    ? QStringLiteral("Could not create the signing certificate.")
+                    : certificateError);
+            return;
+        }
+        QMessageBox::information(
+            this, "Signing certificate created",
+            "Your password-protected signing certificate was saved here:\n\n"
+                + QFileInfo(pfxPath).absoluteFilePath()
+                + "\n\nKeep this file and its password safe. This self-signed "
+                  "certificate may appear untrusted to recipients. It will now be "
+                  "used to sign this PDF.");
+    } else if (chosenButton == useCertificateButton) {
+        pfxPath = QFileDialog::getOpenFileName(
+            this, "Choose signing certificate", QString(),
+            "PKCS#12 certificates (*.pfx *.p12)");
+        if (pfxPath.isEmpty())
+            return;
+
+        bool passwordAccepted = false;
+        pfxPassword = QInputDialog::getText(
+            this, "Certificate password", "Enter the PFX/P12 password:",
+            QLineEdit::Password, QString(), &passwordAccepted);
+        if (!passwordAccepted) {
+            pfxPassword.fill(QChar(0));
+            return;
+        }
+    } else {
+        return;
+    }
+
+    const QString defaultName =
+        QFileInfo(m_currentPath).completeBaseName() + "-signed.pdf";
+    const QString dest = QFileDialog::getSaveFileName(
+        this, "Save signed PDF copy", defaultName, "PDF files (*.pdf)");
+    if (dest.isEmpty()) {
+        pfxPassword.fill(QChar(0));
+        return;
+    }
+
+    if (QFileInfo(dest) == QFileInfo(m_currentPath)
+        || QFileInfo(dest) == QFileInfo(m_history.current())) {
+        pfxPassword.fill(QChar(0));
+        QMessageBox::warning(this, "Digital signature",
+                             "Choose a different file name to keep the original unchanged.");
+        return;
+    }
+
+    QString tempError;
+    const QString tempPath = createSiblingTempPath(dest, "signed", &tempError);
+    if (tempPath.isEmpty()) {
+        pfxPassword.fill(QChar(0));
+        QMessageBox::warning(this, "Digital signature", tempError);
+        return;
+    }
+
+    EditOperationGuard operation(this);
+    PdfEditor signer;
+    const bool signedSuccessfully =
+        signer.open(m_history.current(), m_password)
+        && signer.signAs(tempPath, page, bounds, pfxPath, pfxPassword);
+    pfxPassword.fill(QChar(0));
+    if (!signedSuccessfully) {
+        const QString error = signer.lastError();
+        QFile::remove(tempPath);
+        if (!reopenEditor(m_history.current())) {
+            QMessageBox::warning(
+                this, "Digital signature",
+                "Signing failed, and the original editing state could not be restored. "
+                "Try reopening the current PDF.");
+        }
+        QMessageBox::warning(
+            this, "Digital signature",
+            error.isEmpty() ? QStringLiteral("Could not sign the PDF.") : error);
+        return;
+    }
+
+    QString replacementMessage;
+    if (!replaceFile(tempPath, dest, &replacementMessage)) {
+        QFile::remove(tempPath);
+        if (!reopenEditor(m_history.current())) {
+            QMessageBox::warning(
+                this, "Digital signature",
+                "The signed copy could not be installed, and the original editing state "
+                "could not be restored. Try reopening the current PDF.");
+        }
+        QMessageBox::warning(this, "Digital signature", replacementMessage);
+        return;
+    }
+
+    const QString absoluteDest = QFileInfo(dest).absoluteFilePath();
+    statusBar()->showMessage(
+        replacementMessage.isEmpty()
+            ? QStringLiteral("Signed PDF saved. Opening the signed copy for inspection.")
+            : replacementMessage,
+        8000);
+    loadDocument(absoluteDest, m_password, page);
+}
+
+void MainWindow::showDigitalSignatures()
+{
+    if (!m_editor || m_documentLoadPending || m_documentOperationPending)
+        return;
+
+    const QVector<PdfEditor::DigitalSignatureInfo> signatures =
+        m_editor->digitalSignatures();
+    if (!m_editor->lastError().isEmpty()) {
+        QMessageBox::warning(
+            this, "Verify digital signatures",
+            "Could not inspect the signatures:\n\n" + m_editor->lastError());
+        return;
+    }
+    if (signatures.isEmpty()) {
+        QMessageBox::information(this, "Digital signatures",
+                                 "This PDF contains no signed signature fields.");
+        return;
+    }
+
+    QString report = QString("%1 signature(s) found.\n\n")
+                         .arg(signatures.size());
+    for (int i = 0; i < signatures.size(); ++i) {
+        const PdfEditor::DigitalSignatureInfo &signature = signatures.at(i);
+        report += QString("Signature %1\n").arg(i + 1);
+        report += "Signer: "
+                  + (signature.signerName.isEmpty()
+                         ? QStringLiteral("Name unavailable")
+                         : signature.signerName)
+                  + "\n";
+        report += QString("Cryptographic integrity: %1\n")
+                      .arg(signature.cryptographicallyValid
+                               ? QStringLiteral("Valid")
+                               : QStringLiteral("INVALID or unsupported"));
+        report += QString("Document changes since signing: %1\n")
+                      .arg(signature.documentChangedSinceSigning
+                               ? QStringLiteral("Detected")
+                               : QStringLiteral("None detected"));
+        report += "Certificate trust: "
+                  + (signature.selfSignedCertificate
+                         ? QStringLiteral("Self-signed; not trusted automatically")
+                         : QStringLiteral("Not assessed by PDF@home"))
+                  + "\n\n";
+    }
+    report +=
+        "Integrity checks whether the signed PDF bytes match the signature. "
+        "Certificate trust is separate; PDF@home does not verify certificate "
+        "chains or trusted timestamps. Confirm trust with a PDF reader or "
+        "certificate authority you rely on.";
+    QMessageBox::information(this, "Digital signature verification", report);
 }
 
 bool MainWindow::save()

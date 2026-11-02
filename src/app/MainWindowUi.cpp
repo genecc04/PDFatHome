@@ -92,6 +92,12 @@ void MainWindow::setupViewer()
         QSignalBlocker blocker(m_redactAction);
         m_redactAction->setChecked(active);
     });
+    connect(m_view, &PageView::signaturePlacementRequested,
+            this, &MainWindow::signDocument);
+    connect(m_view, &PageView::signatureToolChanged, this, [this](bool active) {
+        QSignalBlocker blocker(m_signAction);
+        m_signAction->setChecked(active);
+    });
     connect(m_view, &PageView::imagePlaced, this, &MainWindow::placeImage);
     connect(m_view, &PageView::imagePlacementStateChanged, this,
             [this](bool active, bool positioned) {
@@ -375,7 +381,7 @@ void MainWindow::setupMenus()
         }
     });
 
-    m_redactAction = editMenu->addAction("Mark redaction &areas");
+    m_redactAction = editMenu->addAction("&Mark redaction");
     m_redactAction->setCheckable(true);
     m_redactAction->setShortcut(Qt::CTRL | Qt::SHIFT | Qt::Key_R);
     connect(m_redactAction, &QAction::toggled, this, [this](bool on) {
@@ -396,7 +402,7 @@ void MainWindow::setupMenus()
         }
     });
 
-    m_applyRedactionsAction = editMenu->addAction("Apply redactions to &copy...");
+    m_applyRedactionsAction = editMenu->addAction("Apply &redaction...");
     connect(m_applyRedactionsAction, &QAction::triggered,
             this, &MainWindow::applyRedactions);
 
@@ -404,11 +410,25 @@ void MainWindow::setupMenus()
     connect(m_clearRedactionsAction, &QAction::triggered,
             m_view, &PageView::clearRedactionAreas);
 
+    m_signAction = editMenu->addAction("Certificate-based digital &signature...");
+    m_signAction->setCheckable(true);
+    connect(m_signAction, &QAction::toggled, this, [this](bool on) {
+        if (on)
+            m_view->commitPendingEdits();
+        m_view->setSignatureToolActive(on);
+        if (on) {
+            statusBar()->showMessage(
+                "Drag a rectangle where the visible digital signature should appear.",
+                10000);
+        }
+    });
+
     auto *toolGroup = new QActionGroup(this);
     toolGroup->setExclusionPolicy(QActionGroup::ExclusionPolicy::ExclusiveOptional);
     toolGroup->addAction(m_addTextAction);
     toolGroup->addAction(m_drawAction);
     toolGroup->addAction(m_redactAction);
+    toolGroup->addAction(m_signAction);
 
     m_addImageAction = editMenu->addAction("Add &image...");
     m_addImageAction->setShortcut(Qt::CTRL | Qt::Key_I);
@@ -429,6 +449,11 @@ void MainWindow::setupMenus()
         m_searchDock->raise();
         m_search->focusSearchBox();
     });
+
+    m_verifySignaturesAction =
+        viewMenu->addAction("Verify digital &signatures...");
+    connect(m_verifySignaturesAction, &QAction::triggered,
+            this, &MainWindow::showDigitalSignatures);
 
     QMenu *helpMenu = menuBar()->addMenu("&Help");
     connect(helpMenu->addAction("&About"), &QAction::triggered, this, &MainWindow::showAbout);
@@ -533,7 +558,7 @@ void MainWindow::setupImageToolbar()
             m_view, &PageView::setImageCropMode);
 
     m_deleteImageAction = toolbar->addAction("Delete");
-    m_deleteImageAction->setIcon(QIcon(":/icons/deletetext.png"));
+    m_deleteImageAction->setIcon(QIcon(":/icons/deleteimage.png"));
     m_deleteImageAction->setEnabled(false);
     m_deleteImageAction->setToolTip("Delete selected added image");
     connect(m_deleteImageAction, &QAction::triggered,
@@ -630,24 +655,6 @@ void MainWindow::setupDrawToolbar()
     m_drawAction->setIcon(QIcon(":/icons/draw.png"));
     m_drawAction->setToolTip("Draw on the PDF (active when checked)");
 
-    toolbar->addSeparator();
-    toolbar->addAction(m_redactAction);
-    m_redactAction->setToolTip(
-        "Mark rectangular areas for removal from a separate redacted PDF copy");
-    if (QToolButton *button = qobject_cast<QToolButton *>(
-            toolbar->widgetForAction(m_redactAction))) {
-        button->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    }
-
-    toolbar->addAction(m_applyRedactionsAction);
-    m_applyRedactionsAction->setToolTip(
-        "Apply marked redactions and save a separate PDF copy");
-    if (QToolButton *button = qobject_cast<QToolButton *>(
-            toolbar->widgetForAction(m_applyRedactionsAction))) {
-        button->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    }
-
-    toolbar->addSeparator();
     auto *mode = new QComboBox(this);
     mode->addItem("Pen");
     mode->addItem("Highlighter");
@@ -715,4 +722,69 @@ void MainWindow::setupDrawToolbar()
                 applyStyle();
             });
     applyStyle();
+}
+
+void MainWindow::setupSignatureToolbar()
+{
+    QToolBar *toolbar = addToolBar("Markup");
+    toolbar->setObjectName("markupToolbar");
+    toolbar->setMovable(false);
+    toolbar->setIconSize(QSize(kToolbarIconSize, kToolbarIconSize));
+    toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+
+    toolbar->addAction(m_redactAction);
+    m_redactAction->setIcon(QIcon(":/icons/markredaction.png"));
+    m_redactAction->setText("Mark redaction");
+    m_redactAction->setToolTip(
+        "Mark rectangular areas for removal from a separate redacted PDF copy");
+    if (QToolButton *button = qobject_cast<QToolButton *>(
+            toolbar->widgetForAction(m_redactAction))) {
+        button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    }
+
+    toolbar->addAction(m_applyRedactionsAction);
+    m_applyRedactionsAction->setIcon(QIcon(":/icons/applyredaction.png"));
+    m_applyRedactionsAction->setText("Apply redaction");
+    m_applyRedactionsAction->setToolTip(
+        "Apply marked redactions and save a separate PDF copy");
+    if (QToolButton *button = qobject_cast<QToolButton *>(
+            toolbar->widgetForAction(m_applyRedactionsAction))) {
+        button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    }
+
+    toolbar->addSeparator();
+
+    m_esignButton = new QToolButton(toolbar);
+    m_esignButton->setText("E-sign");
+    m_esignButton->setIcon(QIcon(":/icons/esign.png"));
+    m_esignButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    m_esignButton->setPopupMode(QToolButton::InstantPopup);
+    m_esignButton->setStyleSheet(
+        "QToolButton::menu-indicator {"
+        " subcontrol-position: bottom right;"
+        " right: 0px; bottom: 0px;"
+        " width: 0px; height: 0px;"
+        "}");
+    m_esignButton->setToolTip(
+        "Add a visible electronic signature mark. This is not a certificate-based "
+        "digital signature.");
+    auto *eSignatureMenu = new QMenu(m_esignButton);
+    m_esignTypeAction = eSignatureMenu->addAction("Type signature...");
+    connect(m_esignTypeAction, &QAction::triggered,
+            this, &MainWindow::addTypedESignature);
+    m_esignDrawAction = eSignatureMenu->addAction("Draw signature...");
+    connect(m_esignDrawAction, &QAction::triggered,
+            this, &MainWindow::drawESignature);
+    m_esignUploadAction = eSignatureMenu->addAction("Upload signature image...");
+    connect(m_esignUploadAction, &QAction::triggered,
+            this, &MainWindow::uploadESignature);
+    eSignatureMenu->addSeparator();
+    m_manageESignaturesAction = eSignatureMenu->addAction("Saved signatures...");
+    connect(m_manageESignaturesAction, &QAction::triggered,
+            this, &MainWindow::manageESignatures);
+    m_esignButton->setMenu(eSignatureMenu);
+    toolbar->addWidget(m_esignButton);
+
+    m_signAction->setToolTip(
+        "Sign a separate PDF copy using a certificate and private key.");
 }

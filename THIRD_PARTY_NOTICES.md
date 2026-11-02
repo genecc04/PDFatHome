@@ -8,16 +8,17 @@ license obligation.
 ## Scope of this inventory
 
 The versions below reflect the maintainer's development setup: Qt 6.8.0 for
-MSVC 2022 and MuPDF 1.26.10 from vcpkg using the `x64-windows-static-md`
-triplet. The vcpkg component versions were read from that local installation.
+MSVC 2022 and MuPDF 1.26.10 and OpenSSL 3.6.5 from vcpkg using the
+`x64-windows-static-md` triplet. The vcpkg component versions were read from
+that local installation.
 Other Qt installations, vcpkg baselines, features, or triplets can produce a
 different dependency set and must be checked separately.
 
-The source repository does not include Qt or MuPDF binaries. The application
-links to Qt dynamically and links MuPDF statically when built with the
-configuration above. A public source repository and a distributed executable
-are different distribution cases; these notices alone do not satisfy all
-requirements for distributing a binary.
+The source repository does not include Qt, MuPDF, or OpenSSL binaries. The
+application links to Qt dynamically and links MuPDF and OpenSSL statically when
+built with the configuration above. A public source repository and a
+distributed executable are different distribution cases; these notices alone
+do not satisfy all requirements for distributing a binary.
 
 ## Qt
 
@@ -57,6 +58,7 @@ notices for MuPDF and the dependencies listed below are kept in
 | bzip2 | 1.0.8 | bzip2 license | `licenses/vcpkg/bzip2-copyright.txt` |
 | libpng | 1.6.59 | libpng License version 2 | `licenses/vcpkg/libpng-copyright.txt` |
 | libspng | 0.7.4 | BSD 2-Clause and libpng License version 2 | `licenses/vcpkg/libspng-copyright.txt` |
+| OpenSSL | 3.6.5 | Apache License 2.0 | `licenses/vcpkg/openssl-copyright.txt` |
 
 Some listed libraries are transitive dependencies of other libraries in the
 MuPDF build. The table records the installed package set, not a claim that the
@@ -94,6 +96,7 @@ is not identified here as third-party material.
 - Before distributing an executable, create and review a dependency inventory
   for the exact build, include all required notices and license texts, and
   address the applicable obligations for the dynamically linked Qt libraries,
-  statically linked MuPDF and its dependencies.
-- Recheck this file whenever Qt, vcpkg, MuPDF, the triplet, or enabled features
-  change. Do not rely on this development-build snapshot as a release SBOM.
+  statically linked MuPDF, OpenSSL, and their dependencies.
+- Recheck this file whenever Qt, vcpkg, MuPDF, OpenSSL, the triplet, or enabled
+  features change. Do not rely on this development-build snapshot as a release
+  SBOM.
