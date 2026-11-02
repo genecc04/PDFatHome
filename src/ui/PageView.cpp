@@ -54,8 +54,6 @@ constexpr int kPageTileCacheKilobytes = 24 * 1024;
 constexpr int kSharedPageRasterCacheKilobytes = 64 * 1024;
 constexpr int kPageTileSize = 1024;
 constexpr int kPageTileThreshold = 4096;
-// Half of the shared raster budget: a larger untiled page would evict most of
-// the other cached pages by itself.
 constexpr qint64 kPageTileAreaThreshold = 8 * 1000 * 1000;
 constexpr int kPageCachePrefetchRadius = 2;
 
@@ -68,7 +66,6 @@ constexpr int kLoadingTopMargin = 16;
 using Geometry::pointSegmentDistanceSquared;
 using Geometry::segmentDistanceSquared;
 
-// A dashed frame with a square handle on each corner.
 void drawSelectionFrame(QPainter &painter, const QRectF &bounds, const QBrush &fill)
 {
     painter.save();
@@ -783,7 +780,6 @@ void PageView::enforcePageRasterBudget()
 void PageView::reserveTileCache(int visibleTiles)
 {
     constexpr int tileKilobytes = kPageTileSize * kPageTileSize * 4 / 1024;
-    // Half as much again leaves room for tiles that scroll into view.
     const int needed = visibleTiles * tileKilobytes * 3 / 2;
     if (needed <= m_tileStore.cache.maxCost())
         return;

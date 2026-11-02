@@ -64,8 +64,17 @@ try {
         throw "windeployqt failed with exit code $LASTEXITCODE."
     }
 
-    foreach ($requiredDll in @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll",
-                               "Qt6Network.dll")) {
+    foreach ($unusedPath in @("Qt6Network.dll", "Qt6Pdf.dll",
+                              "generic\qtuiotouchplugin.dll",
+                              "imageformats\qpdf.dll",
+                              "networkinformation", "tls")) {
+        $fullPath = Join-Path $stagePath $unusedPath
+        if (Test-Path $fullPath) {
+            Remove-Item $fullPath -Recurse -Force
+        }
+    }
+
+    foreach ($requiredDll in @("Qt6Core.dll", "Qt6Gui.dll", "Qt6Widgets.dll")) {
         if (-not (Test-Path (Join-Path $stagePath $requiredDll) -PathType Leaf)) {
             throw "The deployed Qt runtime is incomplete; '$requiredDll' was not found."
         }

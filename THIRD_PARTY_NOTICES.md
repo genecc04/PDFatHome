@@ -25,9 +25,11 @@ do not satisfy all requirements for distributing a binary.
 - Project: [Qt](https://www.qt.io/)
 - Development version and kit: Qt 6.8.0, MSVC 2022, 64-bit.
 - CMake component requested by this project: Widgets (with its Qt dependencies).
-- The packaging run's `windeployqt` output also selected Qt Core, Gui, Network,
-  Svg, and Widgets runtime libraries and plugins. The exact deployed set can
-  vary with the Qt installation and build.
+- The packaging run's `windeployqt` output selected Qt Core, Gui, Svg, and
+  Widgets runtime libraries and plugins. It also selected Qt Network and Qt Pdf
+  only as dependencies of optional plugins; the application does not use them,
+  and `scripts/package.ps1` removes them and those plugins from the package. The
+  exact deployed set can vary with the Qt installation and build.
 - The maintainer reports using the LGPL-3.0 option. Confirm the selected terms
   and eligibility for the exact installed Qt modules and package before
   distributing the application.
