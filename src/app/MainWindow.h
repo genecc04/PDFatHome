@@ -205,6 +205,7 @@ private:
     QThreadPool m_documentLoadPool;
     bool m_documentLoadPending = false;
     bool m_documentOperationPending = false;
+    bool m_viewOnly = false;
     int m_editOperationDepth = 0;
     quint64 m_editOperationGeneration = 0;
     bool m_busyCursorActive = false;

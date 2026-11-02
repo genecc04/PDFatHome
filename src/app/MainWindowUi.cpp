@@ -158,7 +158,7 @@ void MainWindow::setupViewer()
             QString fontName;
             double fontSize = 12.0;
             QColor color;
-            if (!m_editor
+            if (!m_editor || m_viewOnly
                 || !m_editor->textAnnotationAt(page, point, annotationId, bounds, text,
                                                &fontName, &fontSize, &color))
                 return false;
@@ -170,7 +170,7 @@ void MainWindow::setupViewer()
         });
     m_view->setImageStampHandler(
         [this](int page, const QPointF &point, PdfEditor::ImageStamp *stamp) {
-            if (!m_editor)
+            if (!m_editor || m_viewOnly)
                 return false;
             const bool found = m_editor->imageStampAt(page, point, stamp);
             if (!found && !m_editor->lastError().isEmpty())

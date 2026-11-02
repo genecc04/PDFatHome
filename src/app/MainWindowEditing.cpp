@@ -1132,7 +1132,7 @@ void MainWindow::placeImage(int page, const QRectF &box, const QImage &image)
 
 bool MainWindow::fillFormField(int page, const QPointF &point, PageView::FormField *result)
 {
-    if (!m_editor || !result)
+    if (!m_editor || m_viewOnly || !result)
         return false;
 
     PdfEditor::FormField field;

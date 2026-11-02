@@ -2280,11 +2280,12 @@ bool PdfEditor::setFormFieldValue(int pageIndex, int widgetIndex, const QString 
             if (pdf_widget_is_readonly(m_ctx, widget))
                 break;
 
-            // A widget with its own /T is a complete field. Without one it is a
-            // kid of a shared field (radio groups, repeated widgets), whose
-            // value can change on other pages too.
+            pdf_obj *calculationOrder = pdf_dict_getp(
+                m_ctx, pdf_trailer(m_ctx, m_doc), "Root/AcroForm/CO");
             localToPage = pdf_widget_type(m_ctx, widget) != PDF_WIDGET_TYPE_RADIOBUTTON
-                          && pdf_dict_get(m_ctx, pdf_annot_obj(m_ctx, widget), PDF_NAME(T));
+                          && pdf_dict_get(m_ctx, pdf_annot_obj(m_ctx, widget),
+                                          PDF_NAME(T)) != nullptr
+                          && pdf_array_len(m_ctx, calculationOrder) == 0;
             switch (pdf_widget_type(m_ctx, widget)) {
             case PDF_WIDGET_TYPE_TEXT:
                 accepted = pdf_set_text_field_value(
@@ -2329,5 +2330,3 @@ bool PdfEditor::setFormFieldValue(int pageIndex, int widgetIndex, const QString 
         *pageLocal = localToPage != 0;
     return true;
 }
-
-

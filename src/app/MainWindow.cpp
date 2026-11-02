@@ -136,7 +136,7 @@ void MainWindow::updateTitle()
 void MainWindow::updateActions()
 {
     const bool signedDocument = m_editor && m_editor->hasDigitalSignatures();
-    const bool editable = (m_editor != nullptr) && !m_documentLoadPending
+    const bool editable = (m_editor != nullptr) && !m_viewOnly && !m_documentLoadPending
                           && !m_documentOperationPending && !signedDocument;
 
     m_saveAction->setEnabled(editable && isDocumentModified());

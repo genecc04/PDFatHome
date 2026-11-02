@@ -49,7 +49,7 @@ constexpr double kMinZoom = 0.1;
 constexpr double kMaxZoom = 4.0;
 constexpr int kMaxPendingPageRenders = 4;
 constexpr int kPageImageCacheKilobytes = 64 * 1024;
-constexpr int kBasePageImageCacheKilobytes = 16 * 1024;
+constexpr int kBasePageImageCacheKilobytes = 32 * 1024;
 constexpr int kPageTileCacheKilobytes = 24 * 1024;
 constexpr int kSharedPageRasterCacheKilobytes = 64 * 1024;
 constexpr int kPageTileSize = 1024;
@@ -1131,15 +1131,22 @@ void PageView::finishRasterRender(RasterStore &store, const RasterKey &key, qrea
         const int costKilobytes = int(qBound<qint64>(
             qint64(1), (bytes + 1023) / 1024,
             qint64(std::numeric_limits<int>::max())));
-        store.cache.insert(key, new QPixmap(pixmap), costKilobytes);
-        enforcePageRasterBudget();
-        qCDebug(lcPageRasterCache)
-            << "Raster cache bytes:" << qint64(rasterCostKilobytes()) * 1024
-            << "images:" << m_pageStore.cache.size() + m_baseStore.cache.size()
-                                + m_tileStore.cache.size();
-        if (key.annotated)
-            finishPendingRasterPreview(key.page,
-                                       key.isTile() ? QSize(key.width, key.height) : QSize());
+        if (!store.cache.insert(key, new QPixmap(pixmap), costKilobytes)) {
+            store.failed.insert(key);
+            qWarning().noquote()
+                << QStringLiteral("Page %1 raster (%2 KB) exceeds its cache (%3 KB); "
+                                  "not caching it.")
+                       .arg(key.page + 1).arg(costKilobytes).arg(store.cache.maxCost());
+        } else {
+            enforcePageRasterBudget();
+            qCDebug(lcPageRasterCache)
+                << "Raster cache bytes:" << qint64(rasterCostKilobytes()) * 1024
+                << "images:" << m_pageStore.cache.size() + m_baseStore.cache.size()
+                                    + m_tileStore.cache.size();
+            if (key.annotated)
+                finishPendingRasterPreview(
+                    key.page, key.isTile() ? QSize(key.width, key.height) : QSize());
+        }
     }
     trimPageImageCaches();
 

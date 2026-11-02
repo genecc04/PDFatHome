@@ -313,12 +313,14 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
 
     const QString editorError = result->error;
     const bool editorUnavailable = !hadEditor || !m_editor;
+    m_viewOnly = editorUnavailable;
     endLoading();
 
     if (editorUnavailable) {
         QMessageBox::warning(
             this, "Editing unavailable",
-            "The PDF opened for viewing, but editing could not be started:\n\n"
+            "The PDF opened for viewing only. Editing and saving are turned off "
+            "for this file:\n\n"
                 + (editorError.isEmpty()
                        ? QStringLiteral("No error details were provided.")
                        : editorError));
