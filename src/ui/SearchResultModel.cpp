@@ -19,10 +19,9 @@ SearchResultModel::~SearchResultModel()
     m_searchPool.waitForDone();
 }
 
-void SearchResultModel::setDocument(const QString &path, const QString &password)
+void SearchResultModel::setDocument(const DocumentSource &source)
 {
-    m_documentPath = path;
-    m_password = password;
+    m_source = source;
     setSearchString(m_searchString);
 }
 
@@ -39,22 +38,21 @@ void SearchResultModel::setSearchString(const QString &text)
     m_resultsByPage.clear();
     endResetModel();
 
-    if (m_documentPath.isEmpty() || m_searchString.isEmpty())
+    if (m_source.isEmpty() || m_searchString.isEmpty())
         return;
 
     const quint64 generation = m_searchGeneration;
     const QString query = m_searchString;
-    const QString path = m_documentPath;
-    const QString password = m_password;
+    const DocumentSource source = m_source;
     auto cancellation = std::make_shared<std::atomic_bool>(false);
     m_searchCancellation = cancellation;
 
     m_searchPool.start(QRunnable::create(
-        [this, generation, query, path, password, cancellation]() {
+        [this, generation, query, source, cancellation]() {
             PdfEditor editor;
             QString error;
             QVector<PdfEditor::SearchResult> results;
-            if (!editor.open(path, password)) {
+            if (!editor.open(source.path, source.password)) {
                 error = editor.lastError();
             } else {
                 results = editor.search(query, [cancellation]() {

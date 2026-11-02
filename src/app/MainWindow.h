@@ -124,7 +124,7 @@ private:
     bool refreshAfterPageEdit(const QList<int> &changedPages, int page);
     QList<int> targetPages() const;
     void setupDrawToolbar();
-    void setupSignatureToolbar();
+    void setupMarkupToolbar();
     void placeStrokes(const QVector<PageView::Stroke> &strokes);
     void eraseInk(int page, const QVector<QPointF> &path, double radius);
     void addImage();

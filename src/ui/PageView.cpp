@@ -1,4 +1,5 @@
 #include "PageView.h"
+#include "Geometry.h"
 #include "MuPdfRenderCache.h"
 #include "SearchResultModel.h"
 
@@ -9,7 +10,6 @@
 #include <QContextMenuEvent>
 #include <QCursor>
 #include <QDebug>
-#include <QEventLoop>
 #include <QFocusEvent>
 #include <QFont>
 #include <QGuiApplication>
@@ -33,10 +33,6 @@
 #include <QTimer>
 #include <QWheelEvent>
 #include <QtMath>
-#include <QBuffer>
-#include <QDateTime>
-#include <QFile>
-#include <QFileInfo>
 #include <memory>
 
 #include <algorithm>
@@ -48,8 +44,6 @@ Q_LOGGING_CATEGORY(lcPageRasterCache, "pdfapp.cache.pages")
 
 constexpr int kMargin = 12;
 constexpr int kSpacing = 12;
-constexpr int kLinkGridSize = 16;
-constexpr int kMinLinksForSpatialIndex = 24;
 constexpr int kZoomUpdateIntervalMs = 75;
 constexpr double kMinZoom = 0.1;
 constexpr double kMaxZoom = 4.0;
@@ -71,89 +65,44 @@ constexpr int kLoadingFrameIntervalMs = 80;
 constexpr int kLoadingCardPadding = 12;
 constexpr int kLoadingTopMargin = 16;
 
-class FunctionRunnable final : public QRunnable
+using Geometry::pointSegmentDistanceSquared;
+using Geometry::segmentDistanceSquared;
+
+// A dashed frame with a square handle on each corner.
+void drawSelectionFrame(QPainter &painter, const QRectF &bounds, const QBrush &fill)
 {
-public:
-    explicit FunctionRunnable(std::function<void()> function)
-        : m_function(std::move(function))
-    {
-    }
-
-    void run() override
-    {
-        m_function();
-    }
-
-private:
-    std::function<void()> m_function;
-};
-
-double pointSegmentDistanceSquared(const QPointF &point, const QPointF &start,
-                                   const QPointF &end)
-{
-    const QPointF segment = end - start;
-    const double lengthSquared = QPointF::dotProduct(segment, segment);
-    if (lengthSquared == 0.0) {
-        const QPointF delta = point - start;
-        return QPointF::dotProduct(delta, delta);
-    }
-
-    const double projection = qBound(
-        0.0, QPointF::dotProduct(point - start, segment) / lengthSquared, 1.0);
-    const QPointF delta = point - (start + segment * projection);
-    return QPointF::dotProduct(delta, delta);
+    painter.save();
+    painter.setPen(QPen(QColor(0, 102, 204), 2, Qt::DashLine));
+    painter.setBrush(fill);
+    painter.drawRect(bounds);
+    painter.setPen(QPen(QColor(0, 102, 204), 1));
+    painter.setBrush(Qt::white);
+    const QPointF corners[] = {
+        bounds.topLeft(), bounds.topRight(),
+        bounds.bottomLeft(), bounds.bottomRight()
+    };
+    for (const QPointF &corner : corners)
+        painter.drawRect(QRectF(corner.x() - 4, corner.y() - 4, 8, 8));
+    painter.restore();
 }
 
-double crossProduct(const QPointF &a, const QPointF &b, const QPointF &c)
+void drawDashedRegion(QPainter &painter, const QRectF &bounds, const QColor &line,
+                      const QColor &fill)
 {
-    return (b.x() - a.x()) * (c.y() - a.y())
-           - (b.y() - a.y()) * (c.x() - a.x());
-}
-
-bool pointOnSegment(const QPointF &point, const QPointF &start, const QPointF &end)
-{
-    constexpr double epsilon = 1e-9;
-    return qAbs(crossProduct(start, end, point)) <= epsilon
-           && point.x() >= qMin(start.x(), end.x()) - epsilon
-           && point.x() <= qMax(start.x(), end.x()) + epsilon
-           && point.y() >= qMin(start.y(), end.y()) - epsilon
-           && point.y() <= qMax(start.y(), end.y()) + epsilon;
-}
-
-bool segmentsIntersect(const QPointF &a, const QPointF &b,
-                       const QPointF &c, const QPointF &d)
-{
-    const double abC = crossProduct(a, b, c);
-    const double abD = crossProduct(a, b, d);
-    const double cdA = crossProduct(c, d, a);
-    const double cdB = crossProduct(c, d, b);
-    if (((abC > 0.0 && abD < 0.0) || (abC < 0.0 && abD > 0.0))
-        && ((cdA > 0.0 && cdB < 0.0) || (cdA < 0.0 && cdB > 0.0)))
-        return true;
-    return (abC == 0.0 && pointOnSegment(c, a, b))
-           || (abD == 0.0 && pointOnSegment(d, a, b))
-           || (cdA == 0.0 && pointOnSegment(a, c, d))
-           || (cdB == 0.0 && pointOnSegment(b, c, d));
-}
-
-double segmentDistanceSquared(const QPointF &a, const QPointF &b,
-                              const QPointF &c, const QPointF &d)
-{
-    if (segmentsIntersect(a, b, c, d))
-        return 0.0;
-
-    return qMin(qMin(pointSegmentDistanceSquared(a, c, d),
-                     pointSegmentDistanceSquared(b, c, d)),
-                qMin(pointSegmentDistanceSquared(c, a, b),
-                     pointSegmentDistanceSquared(d, a, b)));
+    painter.save();
+    painter.setPen(QPen(line, 2, Qt::DashLine));
+    painter.setBrush(fill);
+    painter.drawRect(bounds);
+    painter.restore();
 }
 }
 
 PageView::PageView(QWidget *parent)
     : QAbstractScrollArea(parent)
-    , m_cache(kPageImageCacheKilobytes)
-    , m_baseCache(kBasePageImageCacheKilobytes)
-    , m_tileCache(kPageTileCacheKilobytes)
+    , m_pageStore(kPageImageCacheKilobytes)
+    , m_baseStore(kBasePageImageCacheKilobytes)
+    , m_tileStore(kPageTileCacheKilobytes)
+    , m_sharedRasterBudgetKilobytes(kSharedPageRasterCacheKilobytes)
 {
     m_renderPool.setMaxThreadCount(1);
     setFocusPolicy(Qt::StrongFocus);
@@ -225,10 +174,11 @@ PageView::~PageView()
 
 // document and zoom
 
-void PageView::setDocument(PdfEditor *document, bool preserveRasterPreviews)
+void PageView::setDocument(PdfEditor *document, bool preserveRasterPreviews,
+                           const QVector<QSizeF> &pageSizes)
 {
     m_document = document;
-    onDocumentChanged(preserveRasterPreviews);
+    onDocumentChanged(preserveRasterPreviews, pageSizes);
 }
 
 void PageView::setLoading(bool loading)
@@ -290,13 +240,6 @@ void PageView::stepLoading()
     viewport()->repaint(loadingIndicatorRect());
 }
 
-void PageView::setPageSizeHint(const QVector<QSizeF> &sizes)
-{
-    m_pageSizeHint = sizes;
-}
-
-// Slow (asks the document for every page's size) but always correct. Used as a
-// safety net when sizes we worked out ourselves turn out to be wrong.
 QRect PageView::loadingIndicatorRect() const
 {
     const int side = kLoadingDisplaySize + 2 * kLoadingCardPadding;
@@ -321,70 +264,28 @@ void PageView::drawLoadingIndicator(QPainter &painter)
     painter.restore();
 }
 
-void PageView::setRenderSource(const QString &path, const QString &password)
+void PageView::setRenderSource(const DocumentSource &source)
 {
-    m_renderSourcePath = path;
-    m_renderPassword = password;
+    m_renderSource = source;
     invalidatePendingPageRenders();
-    m_failedPageKeys.clear();
-    m_failedBaseKeys.clear();
-    m_failedTileKeys.clear();
+    for (RasterStore *store : rasterStores())
+        store->failed.clear();
     viewport()->update();
 }
 
 void PageView::invalidatePageRenders(const QList<int> &changedPages)
 {
     if (changedPages.isEmpty()) {
-        m_cache.clear();
-        m_baseCache.clear();
-        m_tileCache.clear();
-        m_failedPageKeys.clear();
-        m_failedBaseKeys.clear();
-        m_failedTileKeys.clear();
-        m_stalePageKeys.clear();
-        m_staleBaseKeys.clear();
-        m_staleTileKeys.clear();
+        for (RasterStore *store : rasterStores())
+            store->clear();
         invalidatePendingPageRenders();
         viewport()->update();
         return;
     }
 
     invalidatePendingPageRenders();
-    const QList<quint64> keys = m_cache.keys();
-    for (quint64 key : keys) {
-        if (changedPages.contains(int(key >> 40)))
-            m_stalePageKeys.insert(key);
-    }
-    const QList<quint64> baseKeys = m_baseCache.keys();
-    for (quint64 key : baseKeys) {
-        if (changedPages.contains(int(key >> 40)))
-            m_staleBaseKeys.insert(key);
-    }
-    const QList<RasterTileKey> tileKeys = m_tileCache.keys();
-    for (const RasterTileKey &key : tileKeys) {
-        if (changedPages.contains(key.page))
-            m_staleTileKeys.insert(key);
-    }
-    for (int page : changedPages) {
-        for (auto it = m_failedPageKeys.begin(); it != m_failedPageKeys.end();) {
-            if ((*it >> 40) == quint64(page))
-                it = m_failedPageKeys.erase(it);
-            else
-                ++it;
-        }
-        for (auto it = m_failedBaseKeys.begin(); it != m_failedBaseKeys.end();) {
-            if ((*it >> 40) == quint64(page))
-                it = m_failedBaseKeys.erase(it);
-            else
-                ++it;
-        }
-        for (auto it = m_failedTileKeys.begin(); it != m_failedTileKeys.end();) {
-            if (it->page == page)
-                it = m_failedTileKeys.erase(it);
-            else
-                ++it;
-        }
-    }
+    for (RasterStore *store : rasterStores())
+        store->markPagesStale(changedPages);
 
     viewport()->update();
     const QPoint offset(horizontalScrollBar()->value(), verticalScrollBar()->value());
@@ -396,15 +297,11 @@ void PageView::invalidatePageRenders(const QList<int> &changedPages)
 
 void PageView::markCachedRastersStale()
 {
-    for (quint64 key : m_cache.keys())
-        m_stalePageKeys.insert(key);
-    for (quint64 key : m_baseCache.keys())
-        m_staleBaseKeys.insert(key);
-    for (const RasterTileKey &key : m_tileCache.keys())
-        m_staleTileKeys.insert(key);
+    for (RasterStore *store : rasterStores())
+        store->markAllStale();
 }
 
-void PageView::onDocumentChanged(bool preserveRasterPreviews)
+void PageView::onDocumentChanged(bool preserveRasterPreviews, const QVector<QSizeF> &pageSizes)
 {
     invalidatePendingPageRenders();
     m_zoomTimer->stop();
@@ -450,16 +347,11 @@ void PageView::onDocumentChanged(bool preserveRasterPreviews)
     if (preserveRasterPreviews) {
         markCachedRastersStale();
     } else {
-        m_cache.clear();
-        m_baseCache.clear();
-        m_tileCache.clear();
-        m_stalePageKeys.clear();
-        m_staleBaseKeys.clear();
-        m_staleTileKeys.clear();
+        for (RasterStore *store : rasterStores())
+            store->clear();
     }
-    m_failedPageKeys.clear();
-    m_failedBaseKeys.clear();
-    m_failedTileKeys.clear();
+    for (RasterStore *store : rasterStores())
+        store->failed.clear();
     m_pageSizes.clear();
     m_pageLinkCaches.clear();
     m_searchIndex = -1;
@@ -470,8 +362,8 @@ void PageView::onDocumentChanged(bool preserveRasterPreviews)
         const int count = m_document->pageCount();
         if (count > 0) {
             m_pageLinkCaches.resize(count);
-            if (m_pageSizeHint.size() == count) {
-                m_pageSizes = m_pageSizeHint;
+            if (pageSizes.size() == count) {
+                m_pageSizes = pageSizes;
             } else {
                 m_pageSizes = m_document->pageSizes();
             }
@@ -509,9 +401,9 @@ void PageView::finishPendingRasterPreview(int page, const QSize &tilePageSize)
             int(qFloor((visible.bottom() - target.top()) * dpr / kPageTileSize)));
         for (int tileY = firstTileY; tileY <= lastTileY; ++tileY) {
             for (int tileX = firstTileX; tileX <= lastTileX; ++tileX) {
-                const RasterTileKey key{ page, tilePageSize.width(), tilePageSize.height(),
-                                         tileX, tileY, true };
-                if (!m_tileCache.contains(key) || m_staleTileKeys.contains(key))
+                const RasterKey key{ page, tilePageSize.width(), tilePageSize.height(),
+                                     tileX, tileY, true };
+                if (!m_tileStore.cache.contains(key) || m_tileStore.stale.contains(key))
                     return;
             }
         }
@@ -777,58 +669,18 @@ void PageView::trimPageImageCaches()
         }
     }
 
-    const auto evictDistantPages = [&](QCache<quint64, QPixmap> &cache,
-                                       QSet<quint64> &staleKeys) {
-        const QList<quint64> keys = cache.keys();
-        for (quint64 key : keys) {
-            const int page = int(key >> 40);
-            if (page < keepFirst || page > keepLast) {
-                cache.remove(key);
-                staleKeys.remove(key);
-                ++evicted;
-            }
-        }
+    const auto outsideRetainedRange = [keepFirst, keepLast](const RasterKey &key) {
+        return key.page < keepFirst || key.page > keepLast;
     };
-    evictDistantPages(m_cache, m_stalePageKeys);
-    evictDistantPages(m_baseCache, m_staleBaseKeys);
-    const QList<RasterTileKey> tileKeys = m_tileCache.keys();
-    for (const RasterTileKey &key : tileKeys) {
-        if (key.page < keepFirst || key.page > keepLast) {
-            m_tileCache.remove(key);
-            m_staleTileKeys.remove(key);
-            ++evicted;
-        }
-    }
-
-    for (auto it = m_failedPageKeys.begin(); it != m_failedPageKeys.end();) {
-        const int page = int(*it >> 40);
-        if (page < keepFirst || page > keepLast)
-            it = m_failedPageKeys.erase(it);
-        else
-            ++it;
-    }
-    for (auto it = m_failedBaseKeys.begin(); it != m_failedBaseKeys.end();) {
-        const int page = int(*it >> 40);
-        if (page < keepFirst || page > keepLast)
-            it = m_failedBaseKeys.erase(it);
-        else
-            ++it;
-    }
-    for (auto it = m_failedTileKeys.begin(); it != m_failedTileKeys.end();) {
-        if (it->page < keepFirst || it->page > keepLast)
-            it = m_failedTileKeys.erase(it);
-        else
-            ++it;
-    }
+    for (RasterStore *store : rasterStores())
+        evicted += store->removeIf(outsideRetainedRange);
 
     if (evicted > 0) {
         qCDebug(lcPageRasterCache)
             << "Evicted distant page rasters:" << evicted
             << "visible pages:" << first + 1 << "-" << last + 1
             << "retained range:" << keepFirst + 1 << "-" << keepLast + 1
-            << "cache bytes:"
-            << qint64(m_cache.totalCost() + m_baseCache.totalCost()
-                      + m_tileCache.totalCost()) * 1024;
+            << "cache bytes:" << qint64(rasterCostKilobytes()) * 1024;
     }
     if (evictedLinkPages > 0)
         qCDebug(lcPageRasterCache) << "Evicted link data for distant pages:"
@@ -839,18 +691,25 @@ void PageView::discardQueuedPageRenders()
 {
     ++m_renderGeneration;
     m_renderPool.clear();
-    m_pendingPageKeys.clear();
-    m_pendingBaseKeys.clear();
-    m_pendingTileKeys.clear();
+    for (RasterStore *store : rasterStores())
+        store->pending.clear();
     m_renderRequestsSaturated = false;
+}
+
+std::array<RasterStore *, 3> PageView::rasterStores()
+{
+    // Base, page, tile: the order the shared budget breaks eviction ties in.
+    return { &m_baseStore, &m_pageStore, &m_tileStore };
+}
+
+int PageView::rasterCostKilobytes() const
+{
+    return m_baseStore.cache.totalCost() + m_pageStore.cache.totalCost()
+           + m_tileStore.cache.totalCost();
 }
 
 void PageView::enforcePageRasterBudget()
 {
-    const auto totalCost = [this]() {
-        return m_cache.totalCost() + m_baseCache.totalCost()
-               + m_tileCache.totalCost();
-    };
     const auto visibleRange = [this]() {
         QPair<int, int> range(m_currentPage, m_currentPage);
         if (m_pageRects.isEmpty() || viewport()->height() <= 0)
@@ -879,53 +738,34 @@ void PageView::enforcePageRasterBudget()
     };
 
     int evicted = 0;
-    if (totalCost() > kSharedPageRasterCacheKilobytes) {
+    if (rasterCostKilobytes() > m_sharedRasterBudgetKilobytes) {
         // Gather the cached rasters once, then evict from the farthest page
         // inward, one page at a time.
-        enum class Kind { Base, Page, Tile };
         struct Entry {
             int page;
             int distance;
-            Kind kind;
-            quint64 pageKey;
-            RasterTileKey tileKey;
+            int store;
+            RasterKey key;
         };
+        const std::array<RasterStore *, 3> stores = rasterStores();
         QVector<Entry> entries;
-        for (quint64 key : m_baseCache.keys()) {
-            const int page = int(key >> 40);
-            entries.append({ page, distanceFromVisible(page), Kind::Base, key, {} });
+        for (int store = 0; store < int(stores.size()); ++store) {
+            for (const RasterKey &key : stores[store]->cache.keys())
+                entries.append({ key.page, distanceFromVisible(key.page), store, key });
         }
-        for (quint64 key : m_cache.keys()) {
-            const int page = int(key >> 40);
-            entries.append({ page, distanceFromVisible(page), Kind::Page, key, {} });
-        }
-        for (const RasterTileKey &key : m_tileCache.keys())
-            entries.append({ key.page, distanceFromVisible(key.page), Kind::Tile, 0, key });
         std::sort(entries.begin(), entries.end(), [](const Entry &a, const Entry &b) {
             if (a.distance != b.distance)
                 return a.distance > b.distance;
             if (a.page != b.page)
                 return a.page < b.page;
-            return a.kind < b.kind;
+            return a.store < b.store;
         });
 
         for (const Entry &entry : std::as_const(entries)) {
-            if (totalCost() <= kSharedPageRasterCacheKilobytes)
+            if (rasterCostKilobytes() <= m_sharedRasterBudgetKilobytes)
                 break;
-            switch (entry.kind) {
-            case Kind::Base:
-                m_baseCache.remove(entry.pageKey);
-                m_staleBaseKeys.remove(entry.pageKey);
-                break;
-            case Kind::Page:
-                m_cache.remove(entry.pageKey);
-                m_stalePageKeys.remove(entry.pageKey);
-                break;
-            case Kind::Tile:
-                m_tileCache.remove(entry.tileKey);
-                m_staleTileKeys.remove(entry.tileKey);
-                break;
-            }
+            stores[entry.store]->cache.remove(entry.key);
+            stores[entry.store]->stale.remove(entry.key);
             ++evicted;
         }
     }
@@ -933,9 +773,23 @@ void PageView::enforcePageRasterBudget()
     if (evicted > 0) {
         qCDebug(lcPageRasterCache)
             << "Shared raster budget evicted:" << evicted
-            << "cache bytes:" << qint64(totalCost()) * 1024
-            << "budget bytes:" << qint64(kSharedPageRasterCacheKilobytes) * 1024;
+            << "cache bytes:" << qint64(rasterCostKilobytes()) * 1024
+            << "budget bytes:" << qint64(m_sharedRasterBudgetKilobytes) * 1024;
     }
+}
+
+// A tiled page needs every visible tile cached at once. With a smaller cache
+// the tiles evict each other and parts of the page stay blank or out of date.
+void PageView::reserveTileCache(int visibleTiles)
+{
+    constexpr int tileKilobytes = kPageTileSize * kPageTileSize * 4 / 1024;
+    // Half as much again leaves room for tiles that scroll into view.
+    const int needed = visibleTiles * tileKilobytes * 3 / 2;
+    if (needed <= m_tileStore.cache.maxCost())
+        return;
+    m_tileStore.cache.setMaxCost(needed);
+    m_sharedRasterBudgetKilobytes = qMax(m_sharedRasterBudgetKilobytes,
+                                         needed + kBasePageImageCacheKilobytes);
 }
 
 int PageView::pageAtViewportPoint(const QPoint &point) const
@@ -968,32 +822,6 @@ void PageView::loadPageLinks(int page)
         qWarning().noquote() << "Could not load links for page" << page + 1
                              << ":" << m_document->lastError();
     }
-    for (int row = 0; row < cache.links.size(); ++row) {
-        LinkHitRegion region;
-        region.bounds = cache.links.at(row).bounds;
-        region.linkIndex = row;
-        cache.regions.append(region);
-    }
-
-    if (cache.regions.size() >= kMinLinksForSpatialIndex) {
-        cache.cells.resize(kLinkGridSize * kLinkGridSize);
-        const QSizeF pageSize = m_pageSizes.at(page);
-        const auto cellFor = [](qreal coordinate, qreal extent) {
-            return qBound(0, int(coordinate * kLinkGridSize / extent),
-                          kLinkGridSize - 1);
-        };
-        for (int regionIndex = 0; regionIndex < cache.regions.size(); ++regionIndex) {
-            const QRectF &bounds = cache.regions.at(regionIndex).bounds;
-            const int left = cellFor(bounds.left(), pageSize.width());
-            const int right = cellFor(bounds.right(), pageSize.width());
-            const int top = cellFor(bounds.top(), pageSize.height());
-            const int bottom = cellFor(bounds.bottom(), pageSize.height());
-            for (int y = top; y <= bottom; ++y) {
-                for (int x = left; x <= right; ++x)
-                    cache.cells[y * kLinkGridSize + x].append(regionIndex);
-            }
-        }
-    }
     cache.loaded = true;
 }
 
@@ -1004,27 +832,9 @@ PdfEditor::Link PageView::linkAtViewportPoint(const QPoint &point)
         return {};
 
     const QPointF pagePoint = pagePointFor(page, point);
-    const QVector<PdfEditor::Link> &links = linksOnPage(page);
-    const PageLinkCache &cache = m_pageLinkCaches.at(page);
-    if (!cache.cells.isEmpty()) {
-        const QSizeF pageSize = m_pageSizes.at(page);
-        const auto cellFor = [](qreal coordinate, qreal extent) {
-            return qBound(0, int(coordinate * kLinkGridSize / extent),
-                          kLinkGridSize - 1);
-        };
-        const int x = cellFor(pagePoint.x(), pageSize.width());
-        const int y = cellFor(pagePoint.y(), pageSize.height());
-        for (int regionIndex : cache.cells.at(y * kLinkGridSize + x)) {
-            const LinkHitRegion &region = cache.regions.at(regionIndex);
-            if (region.bounds.contains(pagePoint))
-                return links.at(region.linkIndex);
-        }
-        return {};
-    }
-
-    for (const LinkHitRegion &region : cache.regions) {
-        if (region.bounds.contains(pagePoint))
-            return links.at(region.linkIndex);
+    for (const PdfEditor::Link &link : linksOnPage(page)) {
+        if (link.bounds.contains(pagePoint))
+            return link;
     }
     return {};
 }
@@ -1208,116 +1018,19 @@ void PageView::drawFormFieldOverlays(QPainter &painter, int page, const QRect &p
 QPixmap PageView::pageImage(int page, const QSize &size, qreal dpr,
                             bool includeAnnotations)
 {
-    const quint64 key = (quint64(page) << 40) | (quint64(size.width()) << 20)
-                        | quint64(size.height());
-    QCache<quint64, QPixmap> &cache = includeAnnotations ? m_cache : m_baseCache;
-    QSet<quint64> &failedKeys = includeAnnotations
-                                    ? m_failedPageKeys : m_failedBaseKeys;
-    QSet<quint64> &pendingKeys = includeAnnotations
-                                     ? m_pendingPageKeys : m_pendingBaseKeys;
-    QPixmap *cached = cache.object(key);
-    const bool stale = includeAnnotations ? m_stalePageKeys.contains(key)
-                                          : m_staleBaseKeys.contains(key);
-    if (cached && !stale)
+    RasterStore &store = includeAnnotations ? m_pageStore : m_baseStore;
+    const RasterKey key{ page, size.width(), size.height(), -1, -1, includeAnnotations };
+    if (const QPixmap *cached = rasterFor(store, key, size * dpr, QRectF(), dpr))
         return *cached;
-    if (failedKeys.contains(key))
-        return cached ? *cached : QPixmap();
+    if (store.failed.contains(key))
+        return {};
 
-    if (!pendingKeys.contains(key)
-        && m_pendingPageKeys.size() + m_pendingBaseKeys.size()
-                   + m_pendingTileKeys.size() < kMaxPendingPageRenders) {
-        pendingKeys.insert(key);
-        const quint64 generation = m_renderGeneration;
-        const QString sourcePath = m_renderSourcePath;
-        const QString password = m_renderPassword;
-        const QSize renderSize = size * dpr;
-        const int priority = -qAbs(page - m_currentPage);
-        m_renderPool.start(new FunctionRunnable(
-            [this, page, key, generation, sourcePath, password, renderSize,
-             dpr, includeAnnotations]() {
-                thread_local MuPdfRenderCache renderer;
-
-                QImage image;
-                QString error;
-                if (renderer.open(sourcePath, password, &error)) {
-                    image = renderer.render(page, renderSize, includeAnnotations, &error);
-                    if (image.isNull() && error.isEmpty())
-                        error = QStringLiteral("PDF renderer returned an empty page image.");
-                }
-                QMetaObject::invokeMethod(
-                    this,
-                    [this, page, key, generation, dpr, includeAnnotations,
-                     image = std::move(image), error = std::move(error)]() {
-                        if (generation != m_renderGeneration)
-                            return;
-
-                        QSet<quint64> &pending = includeAnnotations
-                                                     ? m_pendingPageKeys : m_pendingBaseKeys;
-                        QSet<quint64> &failed = includeAnnotations
-                                                    ? m_failedPageKeys : m_failedBaseKeys;
-                        QCache<quint64, QPixmap> &targetCache = includeAnnotations
-                                                                   ? m_cache : m_baseCache;
-                        pending.remove(key);
-
-                        if (image.isNull()) {
-                            failed.insert(key);
-                            qWarning().noquote()
-                                << QStringLiteral("Could not render PDF page %1: %2")
-                                       .arg(page + 1).arg(error);
-                        } else {
-                            failed.remove(key);
-                            if (includeAnnotations)
-                                m_stalePageKeys.remove(key);
-                            else
-                                m_staleBaseKeys.remove(key);
-                            QPixmap pixmap = QPixmap::fromImage(image);
-                            pixmap.setDevicePixelRatio(dpr);
-                            const qint64 bytes =
-                                qint64(pixmap.width()) * pixmap.height() * 4;
-                            const int costKilobytes = int(qBound<qint64>(
-                                qint64(1), (bytes + 1023) / 1024,
-                                qint64(std::numeric_limits<int>::max())));
-                            targetCache.insert(
-                                key, new QPixmap(pixmap), costKilobytes);
-                            enforcePageRasterBudget();
-                            qCDebug(lcPageRasterCache)
-                                << "Raster cache bytes:"
-                                << qint64(m_cache.totalCost() + m_baseCache.totalCost()
-                                          + m_tileCache.totalCost()) * 1024
-                                << "images:" << m_cache.size() + m_baseCache.size()
-                                                   + m_tileCache.size();
-                            if (includeAnnotations)
-                                finishPendingRasterPreview(page);
-                        }
-                        trimPageImageCaches();
-
-                        if (page >= 0 && page < m_pageRects.size()) {
-                            const QPoint offset(horizontalScrollBar()->value(),
-                                                verticalScrollBar()->value());
-                            viewport()->update(
-                                m_pageRects.at(page).translated(-offset));
-                        }
-                        if (m_renderRequestsSaturated) {
-                            m_renderRequestsSaturated = false;
-                            viewport()->update();
-                        }
-                    },
-                    Qt::QueuedConnection);
-            }), priority);
-    } else if (!pendingKeys.contains(key)) {
-        m_renderRequestsSaturated = true;
-    }
-
-    if (cached)
-        return *cached;
-
-    const QList<quint64> candidates = cache.keys();
     QPixmap closestPreview;
     double closestScore = std::numeric_limits<double>::max();
-    for (quint64 candidateKey : candidates) {
-        if ((candidateKey >> 40) != quint64(page))
+    for (const RasterKey &candidateKey : store.cache.keys()) {
+        if (candidateKey.page != page)
             continue;
-        QPixmap *candidate = cache.object(candidateKey);
+        QPixmap *candidate = store.cache.object(candidateKey);
         if (!candidate)
             continue;
         const double logicalWidth = candidate->width() / candidate->devicePixelRatio();
@@ -1342,93 +1055,102 @@ QPixmap PageView::pageTile(int page, const QSize &fullSize, int tileX, int tileY
     if (tilePixels.isEmpty() || page < 0 || page >= m_pageSizes.size())
         return {};
 
-    const RasterTileKey key{ page, fullSize.width(), fullSize.height(), tileX, tileY,
-                             includeAnnotations };
-    QPixmap *cached = m_tileCache.object(key);
-    const bool stale = m_staleTileKeys.contains(key);
-    if (cached && !stale)
-        return *cached;
-    if (m_failedTileKeys.contains(key))
-        return cached ? *cached : QPixmap();
+    const QSizeF pageSize = m_pageSizes.at(page);
+    const QRectF pageRegion(
+        pageSize.width() * pixelX / fullSize.width(),
+        pageSize.height() * pixelY / fullSize.height(),
+        pageSize.width() * tilePixels.width() / fullSize.width(),
+        pageSize.height() * tilePixels.height() / fullSize.height());
+    const RasterKey key{ page, fullSize.width(), fullSize.height(), tileX, tileY,
+                         includeAnnotations };
+    const QPixmap *cached = rasterFor(m_tileStore, key, tilePixels, pageRegion, dpr);
+    return cached ? *cached : QPixmap();
+}
 
-    if (!m_pendingTileKeys.contains(key)
-        && m_pendingPageKeys.size() + m_pendingBaseKeys.size()
-                   + m_pendingTileKeys.size() < kMaxPendingPageRenders) {
-        m_pendingTileKeys.insert(key);
-        const quint64 generation = m_renderGeneration;
-        const QString sourcePath = m_renderSourcePath;
-        const QString password = m_renderPassword;
-        const QSizeF pageSize = m_pageSizes.at(page);
-        const QRectF pageRegion(
-            pageSize.width() * pixelX / fullSize.width(),
-            pageSize.height() * pixelY / fullSize.height(),
-            pageSize.width() * tilePixels.width() / fullSize.width(),
-            pageSize.height() * tilePixels.height() / fullSize.height());
-
-        m_renderPool.start(QRunnable::create(
-            [this, page, key, generation, sourcePath, password, pageRegion,
-             fullSize, tilePixels, dpr, includeAnnotations]() {
-                thread_local MuPdfRenderCache renderer;
-                QImage image;
-                QString error;
-                if (renderer.open(sourcePath, password, &error)) {
-                    image = renderer.renderRegion(page, pageRegion, tilePixels,
-                                                  includeAnnotations, &error);
-                    if (image.isNull() && error.isEmpty())
-                        error = QStringLiteral("PDF renderer returned an empty page tile.");
-                }
-                QMetaObject::invokeMethod(
-                    this,
-                    [this, page, key, generation, dpr, fullSize, includeAnnotations,
-                     image = std::move(image),
-                     error = std::move(error)]() {
-                        if (generation != m_renderGeneration)
-                            return;
-                        m_pendingTileKeys.remove(key);
-                        if (image.isNull()) {
-                            m_failedTileKeys.insert(key);
-                            qWarning().noquote()
-                                << QStringLiteral("Could not render tile for PDF page %1: %2")
-                                       .arg(page + 1).arg(error);
-                        } else {
-                            m_staleTileKeys.remove(key);
-                            QPixmap pixmap = QPixmap::fromImage(image);
-                            pixmap.setDevicePixelRatio(dpr);
-                            const qint64 bytes =
-                                qint64(pixmap.width()) * pixmap.height() * 4;
-                            const int costKilobytes = int(qBound<qint64>(
-                                qint64(1), (bytes + 1023) / 1024,
-                                qint64(std::numeric_limits<int>::max())));
-                            m_tileCache.insert(key, new QPixmap(pixmap), costKilobytes);
-                            enforcePageRasterBudget();
-                            qCDebug(lcPageRasterCache)
-                                << "Raster cache bytes:"
-                                << qint64(m_cache.totalCost() + m_baseCache.totalCost()
-                                          + m_tileCache.totalCost()) * 1024
-                                << "images:" << m_cache.size() + m_baseCache.size()
-                                                   + m_tileCache.size();
-                            if (includeAnnotations)
-                                finishPendingRasterPreview(page, fullSize);
-                        }
-                        trimPageImageCaches();
-                        if (page >= 0 && page < m_pageRects.size()) {
-                            const QPoint offset(horizontalScrollBar()->value(),
-                                                verticalScrollBar()->value());
-                            viewport()->update(
-                                m_pageRects.at(page).translated(-offset));
-                        }
-                        if (m_renderRequestsSaturated) {
-                            m_renderRequestsSaturated = false;
-                            viewport()->update();
-                        }
-                    },
-                    Qt::QueuedConnection);
-            }), -qAbs(page - m_currentPage));
-    } else if (!m_pendingTileKeys.contains(key)) {
+// Returns the cached raster for key (possibly stale), and starts a background
+// render when it is missing or stale and no failure or render is outstanding.
+const QPixmap *PageView::rasterFor(RasterStore &store, const RasterKey &key,
+                                   const QSize &renderSize, const QRectF &pageRegion,
+                                   qreal dpr)
+{
+    const QPixmap *cached = store.cache.object(key);
+    if ((cached && !store.stale.contains(key)) || store.failed.contains(key)
+        || store.pending.contains(key)) {
+        return cached;
+    }
+    if (m_pageStore.pending.size() + m_baseStore.pending.size()
+            + m_tileStore.pending.size() >= kMaxPendingPageRenders) {
         m_renderRequestsSaturated = true;
+        return cached;
     }
 
-    return cached ? *cached : QPixmap();
+    store.pending.insert(key);
+    const quint64 generation = m_renderGeneration;
+    const DocumentSource source = m_renderSource;
+    RasterStore *target = &store;
+    m_renderPool.start(QRunnable::create(
+        [this, target, key, generation, source, renderSize, pageRegion, dpr]() {
+            thread_local MuPdfRenderCache renderer;
+            QImage image;
+            QString error;
+            if (renderer.open(source, &error)) {
+                image = pageRegion.isNull()
+                            ? renderer.render(key.page, renderSize, key.annotated, &error)
+                            : renderer.renderRegion(key.page, pageRegion, renderSize,
+                                                    key.annotated, &error);
+                if (image.isNull() && error.isEmpty())
+                    error = QStringLiteral("PDF renderer returned an empty page image.");
+            }
+            QMetaObject::invokeMethod(
+                this,
+                [this, target, key, generation, dpr, image = std::move(image),
+                 error = std::move(error)]() {
+                    if (generation == m_renderGeneration)
+                        finishRasterRender(*target, key, dpr, image, error);
+                },
+                Qt::QueuedConnection);
+        }), -qAbs(key.page - m_currentPage));
+    return cached;
+}
+
+void PageView::finishRasterRender(RasterStore &store, const RasterKey &key, qreal dpr,
+                                  const QImage &image, const QString &error)
+{
+    store.pending.remove(key);
+    if (image.isNull()) {
+        store.failed.insert(key);
+        qWarning().noquote()
+            << QStringLiteral("Could not render PDF page %1: %2")
+                   .arg(key.page + 1).arg(error);
+    } else {
+        store.failed.remove(key);
+        store.stale.remove(key);
+        QPixmap pixmap = QPixmap::fromImage(image);
+        pixmap.setDevicePixelRatio(dpr);
+        const qint64 bytes = qint64(pixmap.width()) * pixmap.height() * 4;
+        const int costKilobytes = int(qBound<qint64>(
+            qint64(1), (bytes + 1023) / 1024,
+            qint64(std::numeric_limits<int>::max())));
+        store.cache.insert(key, new QPixmap(pixmap), costKilobytes);
+        enforcePageRasterBudget();
+        qCDebug(lcPageRasterCache)
+            << "Raster cache bytes:" << qint64(rasterCostKilobytes()) * 1024
+            << "images:" << m_pageStore.cache.size() + m_baseStore.cache.size()
+                                + m_tileStore.cache.size();
+        if (key.annotated)
+            finishPendingRasterPreview(key.page,
+                                       key.isTile() ? QSize(key.width, key.height) : QSize());
+    }
+    trimPageImageCaches();
+
+    if (key.page >= 0 && key.page < m_pageRects.size()) {
+        const QPoint offset(horizontalScrollBar()->value(), verticalScrollBar()->value());
+        viewport()->update(m_pageRects.at(key.page).translated(-offset));
+    }
+    if (m_renderRequestsSaturated) {
+        m_renderRequestsSaturated = false;
+        viewport()->update();
+    }
 }
 
 void PageView::drawTiledPage(QPainter &painter, int page, const QRect &target,
@@ -1452,6 +1174,7 @@ void PageView::drawTiledPage(QPainter &painter, int page, const QRect &target,
     const int lastTileY = qMin(
         (fullSize.height() - 1) / kPageTileSize,
         int(qFloor((visible.bottom() - target.top()) * dpr / kPageTileSize)));
+    reserveTileCache((lastTileX - firstTileX + 1) * (lastTileY - firstTileY + 1));
 
     for (int tileY = firstTileY; tileY <= lastTileY; ++tileY) {
         for (int tileX = firstTileX; tileX <= lastTileX; ++tileX) {
@@ -1495,34 +1218,282 @@ void PageView::drawStroke(QPainter &painter, const Stroke &stroke, const QRect &
     painter.restore();
 }
 
+QRectF PageView::pageToViewport(const QRect &target, const QRectF &pageBounds) const
+{
+    return QRectF(target.x() + pageBounds.x() * m_scale,
+                  target.y() + pageBounds.y() * m_scale,
+                  pageBounds.width() * m_scale, pageBounds.height() * m_scale);
+}
+
+void PageView::drawEmptyState(QPainter &painter, const QRect &exposed)
+{
+    painter.fillRect(exposed, QColor(245, 247, 250));
+    if (!m_loading) {
+        painter.setPen(QColor(42, 52, 64));
+        QFont titleFont = painter.font();
+        titleFont.setPixelSize(22);
+        titleFont.setWeight(QFont::DemiBold);
+        painter.setFont(titleFont);
+        const QRect titleRect(0, viewport()->height() / 2 - 66,
+                              viewport()->width(), 34);
+        painter.drawText(titleRect, Qt::AlignHCenter | Qt::AlignVCenter,
+                         QStringLiteral("No PDF open"));
+
+        QFont hintFont = painter.font();
+        hintFont.setPixelSize(14);
+        hintFont.setWeight(QFont::Normal);
+        painter.setFont(hintFont);
+        painter.setPen(QColor(100, 110, 122));
+        const QRect hintRect(16, viewport()->height() / 2 - 27,
+                             viewport()->width() - 32, 28);
+        painter.drawText(hintRect, Qt::AlignHCenter | Qt::AlignVCenter,
+                         QStringLiteral("Drag a PDF here or open one to get started"));
+    }
+    drawLoadingIndicator(painter);
+}
+
+void PageView::appendErasedInk(QPainterPath &erasedInk, const QVector<Stroke> &strokes) const
+{
+    for (const Stroke &stroke : strokes) {
+        if (stroke.points.isEmpty())
+            continue;
+        QPainterPath strokePath;
+        const QPointF &first = stroke.points.first();
+        strokePath.moveTo(first.x() * m_scale, first.y() * m_scale);
+        for (int i = 1; i < stroke.points.size(); ++i) {
+            const QPointF &point = stroke.points.at(i);
+            strokePath.lineTo(point.x() * m_scale, point.y() * m_scale);
+        }
+
+        const qreal width = qMax(0.1, stroke.style.widthPoints * m_scale);
+        if (stroke.points.size() == 1) {
+            const QPointF point = strokePath.currentPosition();
+            erasedInk.addEllipse(point, width / 2.0, width / 2.0);
+        } else {
+            QPainterPathStroker stroker;
+            stroker.setWidth(width);
+            stroker.setCapStyle(Qt::RoundCap);
+            stroker.setJoinStyle(Qt::RoundJoin);
+            erasedInk.addPath(stroker.createStroke(strokePath));
+        }
+    }
+}
+
+// The page itself: white backing, the rendered page (or its tiles), and the
+// eraser preview that shows the page without the ink being erased.
+void PageView::drawPageRaster(QPainter &painter, int page, const QRect &target,
+                              const QRect &exposed, qreal dpr)
+{
+    painter.fillRect(target, Qt::white);
+    const QSize fullRasterSize(qMax(1, qRound(target.width() * dpr)),
+                               qMax(1, qRound(target.height() * dpr)));
+    const bool erasingThisPage = m_erasing && m_erasePage == page;
+    const bool tiledPage =
+        (fullRasterSize.width() > kPageTileThreshold
+         || fullRasterSize.height() > kPageTileThreshold
+         || qint64(fullRasterSize.width()) * fullRasterSize.height()
+                > kPageTileAreaThreshold)
+        && !erasingThisPage
+        && m_pendingErasedPage != page;
+    QPixmap renderedPage;
+    if (tiledPage)
+        drawTiledPage(painter, page, target, exposed, dpr);
+    else
+        renderedPage = pageImage(page, target.size(), dpr);
+    const bool exactPageImage = !renderedPage.isNull()
+                                && qAbs(renderedPage.width() / dpr
+                                        - target.width()) < 1.0
+                                && qAbs(renderedPage.height() / dpr
+                                        - target.height()) < 1.0;
+    QPainterPath erasedInk;
+    if (exactPageImage && erasingThisPage) {
+        QVector<Stroke> erasedStrokes;
+        for (const ErasePreviewStroke &preview : std::as_const(m_erasePreviewStrokes)) {
+            if (preview.erased)
+                erasedStrokes.append(preview.stroke);
+        }
+        appendErasedInk(erasedInk, erasedStrokes);
+    }
+    if (exactPageImage && m_pendingErasedPage == page)
+        appendErasedInk(erasedInk, m_pendingErasedStrokes);
+    if (!renderedPage.isNull())
+        painter.drawPixmap(target, renderedPage, renderedPage.rect());
+    if ((erasingThisPage || m_pendingErasedPage == page)
+        && exactPageImage && !erasedInk.isEmpty()) {
+        const QPixmap basePage = pageImage(page, target.size(), dpr, false);
+        painter.save();
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.setClipPath(erasedInk.translated(target.topLeft()),
+                            Qt::IntersectClip);
+        painter.drawPixmap(target, basePage, basePage.rect());
+        painter.restore();
+    }
+}
+
+void PageView::drawSelectionHighlight(QPainter &painter, int page, const QRect &target)
+{
+    for (SelectionPart &part : m_selection) {
+        if (part.page != page)
+            continue;
+        resolveSelectionPart(part);
+        painter.save();
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(0, 120, 215, 90));
+        for (const QPolygonF &polygon : part.bounds) {
+            QPolygonF mapped;
+            for (const QPointF &p : polygon)
+                mapped << QPointF(target.x() + p.x() * m_scale,
+                                  target.y() + p.y() * m_scale);
+            painter.drawPolygon(mapped);
+        }
+        painter.restore();
+    }
+}
+
+// Shows a text box at its new bounds while the page raster still has it at the old ones.
+void PageView::drawTextAnnotationPreview(QPainter &painter, int page, const QRect &target,
+                                         qreal dpr, const QRectF &oldBounds,
+                                         const QRectF &newBounds, const QString &text,
+                                         const TextStyle &style)
+{
+    if (!oldBounds.isEmpty()) {
+        const QPixmap basePage = pageImage(page, target.size(), dpr, false);
+        if (!basePage.isNull()) {
+            painter.save();
+            painter.setCompositionMode(QPainter::CompositionMode_Source);
+            painter.setClipRect(pageToViewport(target, oldBounds), Qt::IntersectClip);
+            painter.drawPixmap(target, basePage, basePage.rect());
+            painter.restore();
+        }
+    }
+
+    QFont font(style.family);
+    font.setPixelSize(qMax(1, qRound(style.sizePoints * m_scale)));
+    painter.save();
+    painter.setFont(font);
+    painter.setPen(style.color);
+    painter.drawText(pageToViewport(target, newBounds),
+                     Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, text);
+    painter.restore();
+}
+
+void PageView::drawImageStampPreview(QPainter &painter, int page, const QRect &target,
+                                     qreal dpr, const QRectF &oldBounds,
+                                     const QRectF &newBounds, const QImage &image)
+{
+    const QPixmap basePage = pageImage(page, target.size(), dpr, false);
+    if (!basePage.isNull()) {
+        painter.save();
+        painter.setCompositionMode(QPainter::CompositionMode_Source);
+        painter.setClipRect(pageToViewport(target, oldBounds), Qt::IntersectClip);
+        painter.drawPixmap(target, basePage, basePage.rect());
+        painter.restore();
+    }
+    if (!newBounds.isEmpty() && !image.isNull()) {
+        painter.save();
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        painter.drawImage(pageToViewport(target, newBounds), image);
+        painter.restore();
+    }
+}
+
+// Everything drawn over a page: selections, in-progress edits, ink and tool previews.
+void PageView::drawPageOverlays(QPainter &painter, int page, const QRect &target, qreal dpr)
+{
+    painter.save();
+    painter.setClipRect(target, Qt::IntersectClip);
+
+    drawSelectionHighlight(painter, page, target);
+
+    if ((m_movingTextAnnotation || m_resizingTextAnnotation)
+        && m_selectedTextAnnotationPage == page) {
+        drawTextAnnotationPreview(painter, page, target, dpr,
+                                  m_textAnnotationResizeOriginalBounds,
+                                  m_selectedTextAnnotationBounds,
+                                  m_selectedTextAnnotationContents,
+                                  m_selectedTextAnnotationStyle);
+    }
+    if (m_pendingTextAnnotationPreview.page == page) {
+        drawTextAnnotationPreview(painter, page, target, dpr,
+                                  m_pendingTextAnnotationPreview.oldBounds,
+                                  m_pendingTextAnnotationPreview.newBounds,
+                                  m_pendingTextAnnotationPreview.text,
+                                  m_pendingTextAnnotationPreview.style);
+    }
+
+    if (m_selectedImagePage == page) {
+        if ((m_movingImageStamp || m_resizingImageStamp)
+            && !m_selectedImagePixmap.isNull()) {
+            drawImageStampPreview(painter, page, target, dpr, m_imageStampOriginalBounds,
+                                  m_selectedImageBounds, m_selectedImagePixmap);
+        }
+        drawSelectionFrame(painter, pageToViewport(target, m_selectedImageBounds),
+                           Qt::NoBrush);
+    }
+    if (m_pendingImageStampPreview.page == page) {
+        drawImageStampPreview(painter, page, target, dpr,
+                              m_pendingImageStampPreview.oldBounds,
+                              m_pendingImageStampPreview.newBounds,
+                              m_pendingImageStampPreview.image);
+    }
+
+    if (m_selectedTextAnnotationPage == page) {
+        drawSelectionFrame(painter,
+                           pageToViewport(target, m_selectedTextAnnotationBounds),
+                           QColor(0, 102, 204, 35));
+    }
+
+    for (const Stroke &stroke : std::as_const(m_strokes)) {
+        if (stroke.page == page)
+            drawStroke(painter, stroke, target);
+    }
+    for (const Stroke &stroke : std::as_const(m_pendingCommittedStrokes)) {
+        if (stroke.page == page)
+            drawStroke(painter, stroke, target);
+    }
+    if (m_drawing && m_activeStroke.page == page)
+        drawStroke(painter, m_activeStroke, target);
+
+    if (m_imageActive && m_imagePage == page)
+        drawImagePlacement(painter, target);
+
+    if (m_drawTool && m_eraserActive && m_erasePage == page) {
+        const QPointF center(m_eraserCursorPos);
+        const qreal radius = qMax(4.0, m_drawStyle.widthPoints * m_scale / 2.0);
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(QPen(QColor(40, 40, 40, 190), 1));
+        painter.setBrush(QColor(255, 255, 255, 100));
+        painter.drawEllipse(center, radius, radius);
+        painter.restore();
+    }
+
+    const QColor redactionLine(120, 0, 0);
+    const QColor redactionFill(180, 0, 0, 150);
+    for (const PdfEditor::RedactionArea &area : std::as_const(m_redactionAreas)) {
+        if (area.page == page)
+            drawDashedRegion(painter, pageToViewport(target, area.bounds),
+                             redactionLine, redactionFill);
+    }
+    if (m_redactionDrawing && m_redactionPage == page
+        && !m_redactionPreview.isEmpty()) {
+        drawDashedRegion(painter, pageToViewport(target, m_redactionPreview),
+                         redactionLine, redactionFill);
+    }
+    if (m_signatureDrawing && m_signaturePage == page
+        && !m_signaturePreview.isEmpty()) {
+        drawDashedRegion(painter, pageToViewport(target, m_signaturePreview),
+                         QColor(0, 76, 153), QColor(0, 102, 204, 40));
+    }
+
+    painter.restore();
+}
+
 void PageView::paintEvent(QPaintEvent *event)
 {
     QPainter painter(viewport());
-    const bool loading = m_loading;
     if (m_pageRects.isEmpty()) {
-        painter.fillRect(event->rect(), QColor(245, 247, 250));
-        if (!loading) {
-            painter.setPen(QColor(42, 52, 64));
-            QFont titleFont = painter.font();
-            titleFont.setPixelSize(22);
-            titleFont.setWeight(QFont::DemiBold);
-            painter.setFont(titleFont);
-            const QRect titleRect(0, viewport()->height() / 2 - 66,
-                                  viewport()->width(), 34);
-            painter.drawText(titleRect, Qt::AlignHCenter | Qt::AlignVCenter,
-                             QStringLiteral("No PDF open"));
-
-            QFont hintFont = painter.font();
-            hintFont.setPixelSize(14);
-            hintFont.setWeight(QFont::Normal);
-            painter.setFont(hintFont);
-            painter.setPen(QColor(100, 110, 122));
-            const QRect hintRect(16, viewport()->height() / 2 - 27,
-                                 viewport()->width() - 32, 28);
-            painter.drawText(hintRect, Qt::AlignHCenter | Qt::AlignVCenter,
-                             QStringLiteral("Drag a PDF here or open one to get started"));
-        }
-        drawLoadingIndicator(painter);
+        drawEmptyState(painter, event->rect());
         return;
     }
     painter.fillRect(event->rect(), QColor(70, 70, 70));
@@ -1549,288 +1520,10 @@ void PageView::paintEvent(QPaintEvent *event)
             break;
 
         const QRect target = r.translated(-offset);
-        painter.fillRect(target, Qt::white);
-        const QSize fullRasterSize(qMax(1, qRound(target.width() * dpr)),
-                                   qMax(1, qRound(target.height() * dpr)));
-        const bool tiledPage =
-            (fullRasterSize.width() > kPageTileThreshold
-             || fullRasterSize.height() > kPageTileThreshold
-             || qint64(fullRasterSize.width()) * fullRasterSize.height()
-                    > kPageTileAreaThreshold)
-            && !(m_erasing && m_erasePage == page)
-            && m_pendingErasedPage != page;
-        QPixmap renderedPage;
-        if (tiledPage)
-            drawTiledPage(painter, page, target, event->rect(), dpr);
-        else
-            renderedPage = pageImage(page, target.size(), dpr);
-        const bool exactPageImage = !renderedPage.isNull()
-                                    && qAbs(renderedPage.width() / dpr
-                                            - target.width()) < 1.0
-                                    && qAbs(renderedPage.height() / dpr
-                                            - target.height()) < 1.0;
-        QPainterPath erasedInk;
-        const auto addErasedStrokes = [this, &erasedInk](const QVector<Stroke> &strokes) {
-            for (const Stroke &stroke : strokes) {
-                if (stroke.points.isEmpty())
-                    continue;
-                QPainterPath strokePath;
-                const QPointF &first = stroke.points.first();
-                strokePath.moveTo(first.x() * m_scale, first.y() * m_scale);
-                for (int i = 1; i < stroke.points.size(); ++i) {
-                    const QPointF &point = stroke.points.at(i);
-                    strokePath.lineTo(point.x() * m_scale, point.y() * m_scale);
-                }
-
-                const qreal width = qMax(0.1, stroke.style.widthPoints * m_scale);
-                if (stroke.points.size() == 1) {
-                    const QPointF point = strokePath.currentPosition();
-                    erasedInk.addEllipse(point, width / 2.0, width / 2.0);
-                } else {
-                    QPainterPathStroker stroker;
-                    stroker.setWidth(width);
-                    stroker.setCapStyle(Qt::RoundCap);
-                    stroker.setJoinStyle(Qt::RoundJoin);
-                    erasedInk.addPath(stroker.createStroke(strokePath));
-                }
-            }
-        };
-        if (exactPageImage && m_erasing && m_erasePage == page) {
-            QVector<Stroke> erasedStrokes;
-            for (const ErasePreviewStroke &preview : std::as_const(m_erasePreviewStrokes)) {
-                if (preview.erased)
-                    erasedStrokes.append(preview.stroke);
-            }
-            addErasedStrokes(erasedStrokes);
-        }
-        if (exactPageImage && m_pendingErasedPage == page) {
-            addErasedStrokes(m_pendingErasedStrokes);
-        }
-        if (!renderedPage.isNull())
-            painter.drawPixmap(target, renderedPage, renderedPage.rect());
-        if (((m_erasing && m_erasePage == page)
-             || m_pendingErasedPage == page)
-            && exactPageImage && !erasedInk.isEmpty()) {
-            const QPixmap basePage = pageImage(page, target.size(), dpr, false);
-            painter.save();
-            painter.setCompositionMode(QPainter::CompositionMode_Source);
-            painter.setClipPath(erasedInk.translated(target.topLeft()),
-                                Qt::IntersectClip);
-            painter.drawPixmap(target, basePage, basePage.rect());
-            painter.restore();
-        }
+        drawPageRaster(painter, page, target, event->rect(), dpr);
         drawSearchResults(painter, page, target, current);
         drawFormFieldOverlays(painter, page, target);
-
-        painter.save();
-        painter.setClipRect(target, Qt::IntersectClip);
-
-        for (SelectionPart &part : m_selection) {
-            if (part.page != page)
-                continue;
-            resolveSelectionPart(part);
-            painter.save();
-            painter.setPen(Qt::NoPen);
-            painter.setBrush(QColor(0, 120, 215, 90));
-            for (const QPolygonF &polygon : part.bounds) {
-                QPolygonF mapped;
-                for (const QPointF &p : polygon)
-                    mapped << QPointF(target.x() + p.x() * m_scale,
-                                      target.y() + p.y() * m_scale);
-                painter.drawPolygon(mapped);
-            }
-            painter.restore();
-        }
-
-        const auto drawTextPreview = [this, &painter, page, target, dpr](
-                                         const QRectF &oldBounds,
-                                         const QRectF &newBounds,
-                                         const QString &text,
-                                         const TextStyle &style) {
-            if (!oldBounds.isEmpty()) {
-                const QPixmap basePage = pageImage(page, target.size(), dpr, false);
-                if (!basePage.isNull()) {
-                    const QRectF oldRect(
-                        target.x() + oldBounds.x() * m_scale,
-                        target.y() + oldBounds.y() * m_scale,
-                        oldBounds.width() * m_scale, oldBounds.height() * m_scale);
-                    painter.save();
-                    painter.setCompositionMode(QPainter::CompositionMode_Source);
-                    painter.setClipRect(oldRect, Qt::IntersectClip);
-                    painter.drawPixmap(target, basePage, basePage.rect());
-                    painter.restore();
-                }
-            }
-
-            const QRectF textBounds(
-                target.x() + newBounds.x() * m_scale,
-                target.y() + newBounds.y() * m_scale,
-                newBounds.width() * m_scale, newBounds.height() * m_scale);
-            QFont font(style.family);
-            font.setPixelSize(qMax(1, qRound(style.sizePoints * m_scale)));
-            painter.save();
-            painter.setFont(font);
-            painter.setPen(style.color);
-            painter.drawText(textBounds, Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap,
-                             text);
-            painter.restore();
-        };
-        if ((m_movingTextAnnotation || m_resizingTextAnnotation)
-            && m_selectedTextAnnotationPage == page) {
-            drawTextPreview(m_textAnnotationResizeOriginalBounds,
-                            m_selectedTextAnnotationBounds,
-                            m_selectedTextAnnotationContents,
-                            m_selectedTextAnnotationStyle);
-        }
-        if (m_pendingTextAnnotationPreview.page == page) {
-            drawTextPreview(m_pendingTextAnnotationPreview.oldBounds,
-                            m_pendingTextAnnotationPreview.newBounds,
-                            m_pendingTextAnnotationPreview.text,
-                            m_pendingTextAnnotationPreview.style);
-        }
-
-        const auto drawImageStampPreview = [this, &painter, page, target, dpr](
-                                               const QRectF &oldPageBounds,
-                                               const QRectF &newPageBounds,
-                                               const QImage &image) {
-            const QRectF oldViewportBounds(
-                target.x() + oldPageBounds.x() * m_scale,
-                target.y() + oldPageBounds.y() * m_scale,
-                oldPageBounds.width() * m_scale,
-                oldPageBounds.height() * m_scale);
-            const QPixmap basePage = pageImage(page, target.size(), dpr, false);
-            if (!basePage.isNull()) {
-                painter.save();
-                painter.setCompositionMode(QPainter::CompositionMode_Source);
-                painter.setClipRect(oldViewportBounds, Qt::IntersectClip);
-                painter.drawPixmap(target, basePage, basePage.rect());
-                painter.restore();
-            }
-            if (!newPageBounds.isEmpty() && !image.isNull()) {
-                const QRectF imageBounds(
-                    target.x() + newPageBounds.x() * m_scale,
-                    target.y() + newPageBounds.y() * m_scale,
-                    newPageBounds.width() * m_scale,
-                    newPageBounds.height() * m_scale);
-                painter.save();
-                painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
-                painter.drawImage(imageBounds, image);
-                painter.restore();
-            }
-        };
-        if (m_selectedImagePage == page) {
-            if ((m_movingImageStamp || m_resizingImageStamp)
-                && !m_selectedImagePixmap.isNull()) {
-                drawImageStampPreview(m_imageStampOriginalBounds,
-                                      m_selectedImageBounds,
-                                      m_selectedImagePixmap);
-            }
-            const QRectF imageBounds(
-                target.x() + m_selectedImageBounds.x() * m_scale,
-                target.y() + m_selectedImageBounds.y() * m_scale,
-                m_selectedImageBounds.width() * m_scale,
-                m_selectedImageBounds.height() * m_scale);
-            painter.save();
-            painter.setPen(QPen(QColor(0, 102, 204), 2, Qt::DashLine));
-            painter.setBrush(Qt::NoBrush);
-            painter.drawRect(imageBounds);
-            painter.setPen(QPen(QColor(0, 102, 204), 1));
-            painter.setBrush(Qt::white);
-            const QPointF corners[] = {
-                imageBounds.topLeft(), imageBounds.topRight(),
-                imageBounds.bottomLeft(), imageBounds.bottomRight()
-            };
-            for (const QPointF &corner : corners)
-                painter.drawRect(QRectF(corner.x() - 4, corner.y() - 4, 8, 8));
-            painter.restore();
-        }
-        if (m_pendingImageStampPreview.page == page) {
-            drawImageStampPreview(m_pendingImageStampPreview.oldBounds,
-                                  m_pendingImageStampPreview.newBounds,
-                                  m_pendingImageStampPreview.image);
-        }
-
-        if (m_selectedTextAnnotationPage == page) {
-            const QRectF bounds(
-                target.x() + m_selectedTextAnnotationBounds.x() * m_scale,
-                target.y() + m_selectedTextAnnotationBounds.y() * m_scale,
-                m_selectedTextAnnotationBounds.width() * m_scale,
-                m_selectedTextAnnotationBounds.height() * m_scale);
-            painter.save();
-            painter.setPen(QPen(QColor(0, 102, 204), 2, Qt::DashLine));
-            painter.setBrush(QColor(0, 102, 204, 35));
-            painter.drawRect(bounds);
-            painter.setPen(QPen(QColor(0, 102, 204), 1));
-            painter.setBrush(Qt::white);
-            const QPointF corners[] = {
-                bounds.topLeft(), bounds.topRight(),
-                bounds.bottomLeft(), bounds.bottomRight()
-            };
-            for (const QPointF &corner : corners)
-                painter.drawRect(QRectF(corner.x() - 4, corner.y() - 4, 8, 8));
-            painter.restore();
-        }
-
-        for (const Stroke &stroke : std::as_const(m_strokes)) {
-            if (stroke.page == page)
-                drawStroke(painter, stroke, target);
-        }
-        for (const Stroke &stroke : std::as_const(m_pendingCommittedStrokes)) {
-            if (stroke.page == page)
-                drawStroke(painter, stroke, target);
-        }
-        if (m_drawing && m_activeStroke.page == page)
-            drawStroke(painter, m_activeStroke, target);
-
-        if (m_imageActive && m_imagePage == page)
-            drawImagePlacement(painter, target);
-
-        if (m_drawTool && m_eraserActive && m_erasePage == page) {
-            const QPointF center(m_eraserCursorPos);
-            const qreal radius = qMax(4.0, m_drawStyle.widthPoints * m_scale / 2.0);
-            painter.save();
-            painter.setRenderHint(QPainter::Antialiasing, true);
-            painter.setPen(QPen(QColor(40, 40, 40, 190), 1));
-            painter.setBrush(QColor(255, 255, 255, 100));
-            painter.drawEllipse(center, radius, radius);
-            painter.restore();
-        }
-
-        const auto drawRedactionPreview = [&painter, &target, this](const QRectF &bounds) {
-            const QRectF pixelBounds(
-                target.x() + bounds.x() * m_scale,
-                target.y() + bounds.y() * m_scale,
-                bounds.width() * m_scale,
-                bounds.height() * m_scale);
-            painter.save();
-            painter.setPen(QPen(QColor(120, 0, 0), 2, Qt::DashLine));
-            painter.setBrush(QColor(180, 0, 0, 150));
-            painter.drawRect(pixelBounds);
-            painter.restore();
-        };
-        for (const PdfEditor::RedactionArea &area : std::as_const(m_redactionAreas)) {
-            if (area.page == page)
-                drawRedactionPreview(area.bounds);
-        }
-        if (m_redactionDrawing && m_redactionPage == page
-            && !m_redactionPreview.isEmpty()) {
-            drawRedactionPreview(m_redactionPreview);
-        }
-        if (m_signatureDrawing && m_signaturePage == page
-            && !m_signaturePreview.isEmpty()) {
-            const QRectF pixelBounds(
-                target.x() + m_signaturePreview.x() * m_scale,
-                target.y() + m_signaturePreview.y() * m_scale,
-                m_signaturePreview.width() * m_scale,
-                m_signaturePreview.height() * m_scale);
-            painter.save();
-            painter.setPen(QPen(QColor(0, 76, 153), 2, Qt::DashLine));
-            painter.setBrush(QColor(0, 102, 204, 40));
-            painter.drawRect(pixelBounds);
-            painter.restore();
-        }
-
-        painter.restore();
+        drawPageOverlays(painter, page, target, dpr);
     }
 
     if (m_dragging && !m_dragRect.isNull()) {

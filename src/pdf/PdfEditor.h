@@ -117,7 +117,6 @@ public:
     bool hasDigitalSignatures() const { return m_hasDigitalSignatures; }
     QVector<DigitalSignatureInfo> digitalSignatures();
     int pageCount();
-    QSizeF pagePointSize(int pageIndex);
     QVector<QSizeF> pageSizes();
     QVector<Link> linksOnPage(int pageIndex);
     QVector<SearchResult> search(const QString &text,
@@ -151,8 +150,6 @@ public:
     bool deletePage(int pageIndex);
     bool highlightText(const QString &text, QList<int> *changedPages = nullptr,
                        const std::function<bool(int, int)> &progress = {});
-    bool bakeAnnotations();
-    bool hasAnnotations();
     bool addInkStroke(int pageIndex, const QVector<QPointF> &points,
                     float red, float green, float blue, double width, double opacity);
     bool inkStrokesOnPage(int pageIndex, QVector<InkStroke> *strokes);

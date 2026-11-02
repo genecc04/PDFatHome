@@ -17,7 +17,7 @@ signals:
 
 private:
     void chooseCustomColor();
-    static QIcon swatch(const QColor &color);
+    QIcon swatch(const QColor &color) const;
 
     QColor m_color;
 };

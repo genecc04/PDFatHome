@@ -64,10 +64,9 @@ void ThumbnailModel::setDevicePixelRatio(qreal ratio)
         emit dataChanged(index(0), index(rowCount() - 1), { Qt::DecorationRole });
 }
 
-void ThumbnailModel::setRenderSource(const QString &path, const QString &password)
+void ThumbnailModel::setRenderSource(const DocumentSource &source)
 {
-    m_renderSourcePath = path;
-    m_renderPassword = password;
+    m_renderSource = source;
 
     // Work queued against the old file is dropped. Pages that were waiting
     // get a repaint, which makes the view ask for them again.
@@ -139,7 +138,7 @@ void ThumbnailModel::invalidateRenders()
 
 void ThumbnailModel::dispatchRenders()
 {
-    if (m_renderSourcePath.isEmpty())
+    if (m_renderSource.isEmpty())
         return;
 
     while (m_inFlight < kMaxInFlight && !m_renderQueue.isEmpty()) {
@@ -162,18 +161,17 @@ void ThumbnailModel::dispatchRenders()
 
         ++m_inFlight;
         const quint64 generation = m_renderGeneration;
-        const QString path = m_renderSourcePath;
-        const QString password = m_renderPassword;
+        const DocumentSource source = m_renderSource;
         const qreal dpr = m_devicePixelRatio;
 
         m_renderPool.start(QRunnable::create(
-            [this, page, generation, path, password, dpr]() {
+            [this, page, generation, source, dpr]() {
                 // One MuPDF document per worker thread; the pool has one thread.
                 thread_local MuPdfRenderCache renderer;
 
                 QImage thumbnail;
                 QString error;
-                if (renderer.open(path, password, &error)) {
+                if (renderer.open(source, &error)) {
                     QImage rendered = renderer.renderThumbnail(
                         page, QSizeF(kThumbWidth * dpr, kThumbHeight * dpr), &error);
                     if (rendered.isNull()) {

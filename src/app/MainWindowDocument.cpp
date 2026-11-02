@@ -270,9 +270,7 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
     m_document = m_editor.get();
     if (!result->pageSizes.isEmpty())
         m_pageSizeCache.insert(working, result->pageSizes);
-    m_view->setPageSizeHint(result->pageSizes);
     const bool shown = showFile(working, page, false);
-    m_view->setPageSizeHint(QVector<QSizeF>());
     if (!shown) {
         m_editor.swap(previousEditor);
         m_document = m_editor.get();
@@ -392,16 +390,14 @@ bool MainWindow::showFile(const QString &path, int page, bool reportErrors,
     m_formFieldPagesLoaded.clear();
     m_formFieldPagesFailed.clear();
     m_view->clearFormFieldOverlays();
-    m_view->setPageSizeHint(pageSizes);
-    m_view->setDocument(m_document, preserveRasterPreviews);
-    m_view->setPageSizeHint(QVector<QSizeF>());
+    m_view->setDocument(m_document, preserveRasterPreviews, pageSizes);
     m_thumbnails->setDocument(m_document);
     m_search->setDocument(m_document, m_password);
     m_bookmarks->setDocument(m_document);
     replacement.reset();
     removeDeferredSnapshots();
-    m_view->setRenderSource(path, m_password);
-    m_thumbnails->setRenderSource(path, m_password);
+    m_view->setRenderSource({ path, m_password });
+    m_thumbnails->setRenderSource({ path, m_password });
 
     {
         QSignalBlocker blocker(m_pageBox);
@@ -1047,8 +1043,8 @@ bool MainWindow::refreshAfterPageEdit(const QList<int> &changedPages, int page)
     }
 
     m_view->invalidatePageRenders(pages);
-    m_view->setRenderSource(newPath, m_password);
-    m_thumbnails->setRenderSource(newPath, m_password);
+    m_view->setRenderSource({ newPath, m_password });
+    m_thumbnails->setRenderSource({ newPath, m_password });
     m_thumbnails->invalidatePageRenders(pages);
 
     if (m_view->pageSizes().size() == m_document->pageCount())

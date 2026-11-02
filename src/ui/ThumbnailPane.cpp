@@ -51,9 +51,9 @@ void ThumbnailPane::invalidatePageRenders(const QList<int> &changedPages)
     m_model->invalidatePageRenders(changedPages);
 }
 
-void ThumbnailPane::setRenderSource(const QString &path, const QString &password)
+void ThumbnailPane::setRenderSource(const DocumentSource &source)
 {
-    m_model->setRenderSource(path, password);
+    m_model->setRenderSource(source);
 }
 
 void ThumbnailPane::setCurrentPage(int page)

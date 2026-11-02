@@ -6,6 +6,8 @@
 #include <QSet>
 #include <QThreadPool>
 
+#include "DocumentSource.h"
+
 class QMimeData;
 class QTimer;
 class PdfEditor;
@@ -18,7 +20,7 @@ public:
     static constexpr int kThumbHeight = 170;
     static inline const QString kPageMimeType = QStringLiteral("application/x-pdfapp-page");
     ~ThumbnailModel() override;
-    void setRenderSource(const QString &path, const QString &password);
+    void setRenderSource(const DocumentSource &source);
 
     explicit ThumbnailModel(QObject *parent = nullptr);
 
@@ -41,8 +43,7 @@ private:
     void invalidateRenders();
 
     QThreadPool m_renderPool;
-    QString m_renderSourcePath;
-    QString m_renderPassword;
+    DocumentSource m_renderSource;
     quint64 m_renderGeneration = 0;
     qreal m_devicePixelRatio = 1.0;
     int m_inFlight = 0;

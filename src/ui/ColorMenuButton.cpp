@@ -17,7 +17,7 @@ ColorMenuButton::ColorMenuButton(const QColor &initial, QWidget *parent)
 
     auto *menu = new QMenu(this);
 
-    const QVector<QPair<QString, QColor>> presets = {
+    static const QVector<QPair<QString, QColor>> presets = {
         { "Black", QColor(0, 0, 0) },
         { "Dark gray", QColor(90, 90, 90) },
         { "Blue", QColor(0, 51, 204) },
@@ -65,12 +65,15 @@ void ColorMenuButton::chooseCustomColor()
         setColor(chosen);
 }
 
-QIcon ColorMenuButton::swatch(const QColor &color)
+QIcon ColorMenuButton::swatch(const QColor &color) const
 {
-    QPixmap pixmap(20, 20);
+    constexpr int size = 20;
+    const qreal dpr = devicePixelRatioF();
+    QPixmap pixmap(QSize(size, size) * dpr);
+    pixmap.setDevicePixelRatio(dpr);
     pixmap.fill(color);
     QPainter painter(&pixmap);
     painter.setPen(QColor(90, 90, 90));
-    painter.drawRect(0, 0, 19, 19);
+    painter.drawRect(0, 0, size - 1, size - 1);
     return QIcon(pixmap);
 }

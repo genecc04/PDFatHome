@@ -17,37 +17,20 @@
 #include <QUrl>
 #include <QVector>
 #include <QThreadPool>
+#include <array>
 #include <functional>
 
 #include "PdfEditor.h"
+#include "DocumentSource.h"
+#include "RasterStore.h"
 
 class QComboBox;
 class QLineEdit;
+class QPainterPath;
 class QPlainTextEdit;
 class QPushButton;
 class SearchResultModel;
 class QTimer;
-
-struct RasterTileKey
-{
-    int page = -1;
-    int width = 0;
-    int height = 0;
-    int tileX = 0;
-    int tileY = 0;
-    bool annotated = true;
-
-    friend bool operator==(const RasterTileKey &a, const RasterTileKey &b) noexcept
-    {
-        return a.page == b.page && a.width == b.width && a.height == b.height
-               && a.tileX == b.tileX && a.tileY == b.tileY && a.annotated == b.annotated;
-    }
-    friend size_t qHash(const RasterTileKey &key, size_t seed = 0) noexcept
-    {
-        return qHashMulti(seed, key.page, key.width, key.height, key.tileX, key.tileY,
-                          key.annotated);
-    }
-};
 
 class PageView : public QAbstractScrollArea
 {
@@ -92,14 +75,15 @@ public:
     explicit PageView(QWidget *parent = nullptr);
     ~PageView() override;
 
-    void setDocument(PdfEditor *document, bool preserveRasterPreviews = false);
+    // pageSizes, when its length matches the page count, saves asking the document for them.
+    void setDocument(PdfEditor *document, bool preserveRasterPreviews = false,
+                     const QVector<QSizeF> &pageSizes = {});
     void setLoading(bool loading);
     void setInteractionBlocked(bool blocked);
-    void setPageSizeHint(const QVector<QSizeF> &sizes);
     QVector<QSizeF> pageSizes() const { return m_pageSizes; }
     QPair<int, int> visiblePageRange() const;
     void stepLoading();
-    void setRenderSource(const QString &path, const QString &password = QString());
+    void setRenderSource(const DocumentSource &source);
     void invalidatePageRenders(const QList<int> &changedPages = {});
     void setSearchModel(SearchResultModel *model);
     void setCurrentSearchResultIndex(int index);
@@ -254,24 +238,18 @@ private:
         FormField field;
     };
 
-    struct LinkHitRegion {
-        QRectF bounds;
-        int linkIndex = -1;
-    };
-
     struct PageLinkCache {
         QVector<PdfEditor::Link> links;
-        QVector<LinkHitRegion> regions;
-        QVector<QVector<int>> cells;
         bool loaded = false;
     };
 
-    void onDocumentChanged(bool preserveRasterPreviews);
+    void onDocumentChanged(bool preserveRasterPreviews, const QVector<QSizeF> &pageSizes);
     void markCachedRastersStale();
     void invalidatePendingPageRenders();
     void discardQueuedPageRenders();
     void trimPageImageCaches();
     void enforcePageRasterBudget();
+    void reserveTileCache(int visibleTiles);
     void recalculateLayout(bool keepPosition);
     double fitPageZoomFactor() const;
     void positionEmptyStateButton();
@@ -291,6 +269,13 @@ private:
                       bool includeAnnotations = true);
     QPixmap pageTile(int page, const QSize &fullSize, int tileX, int tileY,
                      int tileSize, qreal dpr, bool includeAnnotations);
+    const QPixmap *rasterFor(RasterStore &store, const RasterKey &key,
+                             const QSize &renderSize, const QRectF &pageRegion,
+                             qreal dpr);
+    void finishRasterRender(RasterStore &store, const RasterKey &key, qreal dpr,
+                            const QImage &image, const QString &error);
+    std::array<RasterStore *, 3> rasterStores();
+    int rasterCostKilobytes() const;
     void drawTiledPage(QPainter &painter, int page, const QRect &target,
                        const QRect &exposed, qreal dpr);
     void updateErasePreview(const QPointF &start, const QPointF &end,
@@ -300,6 +285,20 @@ private:
                            const PdfEditor::SearchResult &current);
     void drawFormFieldOverlays(QPainter &painter, int page, const QRect &pageRect);
     void drawStroke(QPainter &painter, const Stroke &stroke, const QRect &pageRect);
+    void drawEmptyState(QPainter &painter, const QRect &exposed);
+    void drawPageRaster(QPainter &painter, int page, const QRect &target,
+                        const QRect &exposed, qreal dpr);
+    void drawPageOverlays(QPainter &painter, int page, const QRect &target, qreal dpr);
+    void drawSelectionHighlight(QPainter &painter, int page, const QRect &target);
+    void drawTextAnnotationPreview(QPainter &painter, int page, const QRect &target,
+                                   qreal dpr, const QRectF &oldBounds,
+                                   const QRectF &newBounds, const QString &text,
+                                   const TextStyle &style);
+    void drawImageStampPreview(QPainter &painter, int page, const QRect &target,
+                               qreal dpr, const QRectF &oldBounds,
+                               const QRectF &newBounds, const QImage &image);
+    void appendErasedInk(QPainterPath &erasedInk, const QVector<Stroke> &strokes) const;
+    QRectF pageToViewport(const QRect &target, const QRectF &pageBounds) const;
     void finishPendingRasterPreview(int page, const QSize &tilePageSize = {});
 
     void startEditor(int page, const QRectF &boxPoints);
@@ -339,8 +338,7 @@ private:
     int imageStampResizeHandleAt(const QPoint &pos) const;
 
     PdfEditor *m_document = nullptr;
-    QString m_renderSourcePath;
-    QString m_renderPassword;
+    DocumentSource m_renderSource;
     quint64 m_renderGeneration = 0;
     bool m_renderRequestsSaturated = false;
     QThreadPool m_renderPool;
@@ -362,7 +360,6 @@ private:
     QVector<QSizeF> m_pageSizes;
     double m_maxPageWidth = 1.0;
     double m_maxPageHeight = 1.0;
-    QVector<QSizeF> m_pageSizeHint;
     QVector<QRect> m_pageRects;
     QSize m_documentSize;
     int m_currentPage = 0;
@@ -376,18 +373,10 @@ private:
     QPointF m_pressedLinkLocation;
     QUrl m_hoveredLinkUrl;
 
-    QCache<quint64, QPixmap> m_cache;
-    QCache<quint64, QPixmap> m_baseCache;
-    QCache<RasterTileKey, QPixmap> m_tileCache;
-    QSet<quint64> m_failedPageKeys;
-    QSet<quint64> m_failedBaseKeys;
-    QSet<quint64> m_stalePageKeys;
-    QSet<quint64> m_staleBaseKeys;
-    QSet<quint64> m_pendingPageKeys;
-    QSet<quint64> m_pendingBaseKeys;
-    QSet<RasterTileKey> m_failedTileKeys;
-    QSet<RasterTileKey> m_staleTileKeys;
-    QSet<RasterTileKey> m_pendingTileKeys;
+    RasterStore m_pageStore;
+    RasterStore m_baseStore;
+    RasterStore m_tileStore;
+    int m_sharedRasterBudgetKilobytes = 0;
 
     // text tool
     bool m_textTool = false;

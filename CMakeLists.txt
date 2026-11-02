@@ -11,16 +11,23 @@ find_package(unofficial-libmupdf CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
 add_executable(PdfApp WIN32
+    src/app/AnnotationFonts.h
     src/app/main.cpp
     src/app/MainWindow.cpp
     src/app/MainWindow.h
     src/app/MainWindowDocument.cpp
     src/app/MainWindowEditing.cpp
     src/app/MainWindowUi.cpp
+    src/core/DocumentSource.h
     src/core/EditHistory.cpp
     src/core/EditHistory.h
+    src/core/Geometry.h
+    src/pdf/MuPdfRenderCache.cpp
+    src/pdf/MuPdfRenderCache.h
     src/pdf/PdfEditor.cpp
     src/pdf/PdfEditor.h
+    src/pdf/PdfSigning.cpp
+    src/pdf/RenderDocumentBytesCache.h
     src/ui/BookmarkPane.cpp
     src/ui/BookmarkPane.h
     src/ui/ColorMenuButton.cpp
@@ -29,20 +36,17 @@ add_executable(PdfApp WIN32
     src/ui/PageRangeDialog.h
     src/ui/PageView.cpp
     src/ui/PageView.h
+    src/ui/RasterStore.h
     src/ui/SearchPane.cpp
     src/ui/SearchPane.h
     src/ui/SearchResultModel.cpp
     src/ui/SearchResultModel.h
-    src/ui/TextRenderer.cpp
-    src/ui/TextRenderer.h
     src/ui/ThumbnailModel.cpp
     src/ui/ThumbnailModel.h
     src/ui/ThumbnailPane.cpp
     src/ui/ThumbnailPane.h
     resources/app_resources.qrc
     resources/pdfappicon.rc
-    src/ui/RenderDocumentBytesCache.h
-    src/ui/MuPdfRenderCache.h
 )
 
 target_include_directories(PdfApp PRIVATE

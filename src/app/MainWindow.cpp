@@ -17,7 +17,6 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QSettings>
-#include <QSpinBox>
 #include <QStatusBar>
 #include <QToolButton>
 #include <QTimer>
@@ -47,7 +46,7 @@ MainWindow::MainWindow(QWidget *parent)
     setupImageToolbar();
     setupTextToolbar();
     setupDrawToolbar();
-    setupSignatureToolbar();
+    setupMarkupToolbar();
     updateActions();
 
     setAcceptDrops(true);

@@ -2,6 +2,8 @@
 #include <QList>
 #include <QListView>
 
+#include "DocumentSource.h"
+
 class QDropEvent;
 class QEvent;
 class QResizeEvent;
@@ -17,7 +19,7 @@ public:
 
     void setDocument(PdfEditor *document);
     void invalidatePageRenders(const QList<int> &changedPages = {});
-    void setRenderSource(const QString &path, const QString &password);
+    void setRenderSource(const DocumentSource &source);
     void setCurrentPage(int page);
     void setReorderEnabled(bool enabled);
 

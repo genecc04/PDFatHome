@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "AnnotationFonts.h"
 #include "BookmarkPane.h"
 #include "ColorMenuButton.h"
 #include "PdfEditor.h"
@@ -33,6 +34,23 @@ namespace
 {
 constexpr int kToolbarIconSize = 32;
 constexpr int kNumericControlWidth = 88;
+
+QToolBar *makeToolbar(QMainWindow *window, const QString &title,
+                      const QString &objectName,
+                      Qt::ToolButtonStyle buttonStyle = Qt::ToolButtonIconOnly,
+                      bool highlightChecked = false)
+{
+    QToolBar *toolbar = window->addToolBar(title);
+    toolbar->setObjectName(objectName);
+    toolbar->setMovable(false);
+    toolbar->setIconSize(QSize(kToolbarIconSize, kToolbarIconSize));
+    toolbar->setToolButtonStyle(buttonStyle);
+    if (highlightChecked) {
+        toolbar->setStyleSheet(QStringLiteral(
+            "QToolButton:checked { border: 2px solid palette(highlight); border-radius: 4px; }"));
+    }
+    return toolbar;
+}
 }
 
 void MainWindow::setupViewer()
@@ -145,11 +163,7 @@ void MainWindow::setupViewer()
                                                &fontName, &fontSize, &color))
                 return false;
 
-            style->family = fontName == QLatin1String("TiRo")
-                ? QStringLiteral("Times")
-                : fontName == QLatin1String("Cour")
-                    ? QStringLiteral("Courier")
-                    : QStringLiteral("Helvetica");
+            style->family = AnnotationFonts::family(fontName);
             style->sizePoints = fontSize;
             style->color = color;
             return true;
@@ -462,11 +476,7 @@ void MainWindow::setupMenus()
 
 void MainWindow::setupToolbar()
 {
-    QToolBar *toolbar = addToolBar("Navigation");
-    toolbar->setObjectName("navigationToolbar");
-    toolbar->setMovable(false);
-    toolbar->setIconSize(QSize(kToolbarIconSize, kToolbarIconSize));
-    toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    QToolBar *toolbar = makeToolbar(this, "Navigation", "navigationToolbar");
 
     // Page navigation
     QAction *prevAction = toolbar->addAction("< Prev");
@@ -540,11 +550,7 @@ void MainWindow::setupToolbar()
 
 void MainWindow::setupImageToolbar()
 {
-    QToolBar *toolbar = addToolBar("Image");
-    toolbar->setObjectName("imageToolbar");
-    toolbar->setMovable(false);
-    toolbar->setIconSize(QSize(kToolbarIconSize, kToolbarIconSize));
-    toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
+    QToolBar *toolbar = makeToolbar(this, "Image", "imageToolbar");
 
     toolbar->addAction(m_addImageAction);
     m_addImageAction->setIcon(QIcon(":/icons/addimage.png"));
@@ -576,13 +582,7 @@ void MainWindow::setupImageToolbar()
 
 void MainWindow::setupTextToolbar()
 {
-    QToolBar *toolbar = addToolBar("Text");
-    toolbar->setObjectName("textToolbar");
-    toolbar->setMovable(false);
-    toolbar->setIconSize(QSize(kToolbarIconSize, kToolbarIconSize));
-    toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    toolbar->setStyleSheet(
-        "QToolButton:checked { border: 2px solid palette(highlight); border-radius: 4px; }");
+    QToolBar *toolbar = makeToolbar(this, "Text", "textToolbar", Qt::ToolButtonIconOnly, true);
 
     toolbar->addAction(m_addTextAction);
     m_addTextAction->setIcon(QIcon(":/icons/addtext.png"));
@@ -596,8 +596,8 @@ void MainWindow::setupTextToolbar()
     toolbar->addSeparator();
 
     auto *fontBox = new QComboBox(this);
-    fontBox->addItems({ "Helvetica", "Times", "Courier" });
-    fontBox->setCurrentText("Helvetica");
+    fontBox->addItems(AnnotationFonts::families());
+    fontBox->setCurrentText(AnnotationFonts::families().first());
     fontBox->setMinimumWidth(130);
     fontBox->setFocusPolicy(Qt::NoFocus);
     fontBox->setProperty("textEditorStyleControl", true);
@@ -643,13 +643,7 @@ void MainWindow::setupTextToolbar()
 
 void MainWindow::setupDrawToolbar()
 {
-    QToolBar *toolbar = addToolBar("Draw");
-    toolbar->setObjectName("drawToolbar");
-    toolbar->setMovable(false);
-    toolbar->setIconSize(QSize(kToolbarIconSize, kToolbarIconSize));
-    toolbar->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    toolbar->setStyleSheet(
-        "QToolButton:checked { border: 2px solid palette(highlight); border-radius: 4px; }");
+    QToolBar *toolbar = makeToolbar(this, "Draw", "drawToolbar", Qt::ToolButtonIconOnly, true);
 
     toolbar->addAction(m_drawAction);
     m_drawAction->setIcon(QIcon(":/icons/draw.png"));
@@ -724,13 +718,10 @@ void MainWindow::setupDrawToolbar()
     applyStyle();
 }
 
-void MainWindow::setupSignatureToolbar()
+void MainWindow::setupMarkupToolbar()
 {
-    QToolBar *toolbar = addToolBar("Markup");
-    toolbar->setObjectName("markupToolbar");
-    toolbar->setMovable(false);
-    toolbar->setIconSize(QSize(kToolbarIconSize, kToolbarIconSize));
-    toolbar->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    QToolBar *toolbar = makeToolbar(this, "Markup", "markupToolbar",
+                                    Qt::ToolButtonTextBesideIcon);
 
     toolbar->addAction(m_redactAction);
     m_redactAction->setIcon(QIcon(":/icons/markredaction.png"));

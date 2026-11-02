@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "AnnotationFonts.h"
 #include "ColorMenuButton.h"
 #include "PageRangeDialog.h"
 #include "PdfEditor.h"
@@ -432,12 +433,7 @@ namespace {
     }
     QString annotationFontName(const PageView::TextStyle &style)
     {
-        const QString family = style.family.toLower();
-        if (family.contains("times") || family.contains("serif"))
-            return QStringLiteral("TiRo");
-        if (family.contains("courier") || family.contains("mono"))
-            return QStringLiteral("Cour");
-        return QStringLiteral("Helv");
+        return AnnotationFonts::pdfName(style.family);
     }
 }
 
