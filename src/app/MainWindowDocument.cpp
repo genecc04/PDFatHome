@@ -82,7 +82,7 @@ namespace {
         if (!targetInfo.exists()) {
             QFile signedCopy(source);
             if (!signedCopy.rename(target)) {
-                *message = "Could not install the signed PDF ("
+                *message = "Could not install the PDF ("
                            + signedCopy.errorString() + ").";
                 return false;
             }
@@ -264,6 +264,7 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
 
     m_password = password;
     m_view->stepLoading();
+    const bool hadEditor = result->editor != nullptr;
     std::unique_ptr<PdfEditor> previousEditor = std::move(m_editor);
     m_editor = std::move(result->editor);
     m_document = m_editor.get();
@@ -313,9 +314,10 @@ void MainWindow::finishDocumentLoad(const QString &path, const QString &password
     m_view->stepLoading();
 
     const QString editorError = result->error;
+    const bool editorUnavailable = !hadEditor || !m_editor;
     endLoading();
 
-    if (!m_editor) {
+    if (editorUnavailable) {
         QMessageBox::warning(
             this, "Editing unavailable",
             "The PDF opened for viewing, but editing could not be started:\n\n"

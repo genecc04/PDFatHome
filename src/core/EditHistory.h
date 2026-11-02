@@ -20,6 +20,8 @@ public:
 
     QString undo();
     QString redo();
+    QString peekUndo() const;
+    QString peekRedo() const;
     void markSaved();
 
 private:

@@ -441,6 +441,7 @@ QList<int> MainWindow::targetPages() const
 
 void MainWindow::rotateSelectedPages(int degrees)
 {
+    m_view->commitPendingEdits();
     if (!m_editor)
         return;
     EditOperationGuard operation(this);
@@ -471,6 +472,7 @@ void MainWindow::rotateSelectedPages(int degrees)
 
 void MainWindow::deleteSelectedPages()
 {
+    m_view->commitPendingEdits();
     if (!m_editor)
         return;
 
@@ -505,6 +507,7 @@ void MainWindow::deleteSelectedPages()
 
 void MainWindow::movePage(int from, int to)
 {
+    m_view->commitPendingEdits();
     if (!m_editor || m_documentLoadPending || m_documentOperationPending)
         return;
     EditOperationGuard operation(this);
@@ -638,6 +641,7 @@ void MainWindow::exportPages(const QString &format)
 
 void MainWindow::insertPages()
 {
+    m_view->commitPendingEdits();
     if (!m_editor)
         return;
 
@@ -668,6 +672,7 @@ void MainWindow::insertPages()
 
 void MainWindow::highlightText()
 {
+    m_view->commitPendingEdits();
     if (!m_editor)
         return;
 
@@ -1253,17 +1258,17 @@ void MainWindow::undo()
         return;
     if (m_view->undoLastStroke())
         return;
-    stepHistory(m_history.undo());
+    stepHistory(m_history.peekUndo(), true);
 }
 
 void MainWindow::redo()
 {
     if (m_documentLoadPending || m_documentOperationPending)
         return;
-    stepHistory(m_history.redo());
+    stepHistory(m_history.peekRedo(), false);
 }
 
-void MainWindow::stepHistory(const QString &path)
+void MainWindow::stepHistory(const QString &path, bool undo)
 {
     if (path.isEmpty())
         return;
@@ -1272,6 +1277,10 @@ void MainWindow::stepHistory(const QString &path)
     const int page = m_view->currentPage();
     if (!showFile(path, page, true, false, true))
         return;
+    if (undo)
+        m_history.undo();
+    else
+        m_history.redo();
 
     refreshFormFieldOverlays();
 

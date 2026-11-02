@@ -76,6 +76,16 @@ QString EditHistory::redo()
     return m_states.at(m_index);
 }
 
+QString EditHistory::peekUndo() const
+{
+    return canUndo() ? m_states.at(m_index - 1) : QString();
+}
+
+QString EditHistory::peekRedo() const
+{
+    return canRedo() ? m_states.at(m_index + 1) : QString();
+}
+
 void EditHistory::markSaved()
 {
     m_saved = m_index;

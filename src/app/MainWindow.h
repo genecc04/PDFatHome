@@ -135,7 +135,7 @@ private:
     bool refreshFormFieldOverlays(int firstPage = -1, int lastPage = -1);
     void undo();
     void redo();
-    void stepHistory(const QString &path);
+    void stepHistory(const QString &path, bool undo);
 
     // document state
     bool confirmDiscard();

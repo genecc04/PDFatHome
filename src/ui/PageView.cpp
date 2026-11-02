@@ -1154,14 +1154,14 @@ void PageView::drawFormFieldOverlays(QPainter &painter, int page, const QRect &p
             if (overlay.field.checked) {
                 painter.setPen(QPen(Qt::black, qMax(1.0, bounds.width() * 0.09),
                                     Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-                painter.drawLine(bounds.left() + bounds.width() * 0.22,
-                                 bounds.center().y(),
-                                 bounds.left() + bounds.width() * 0.43,
-                                 bounds.bottom() - bounds.height() * 0.24);
-                painter.drawLine(bounds.left() + bounds.width() * 0.43,
-                                 bounds.bottom() - bounds.height() * 0.24,
-                                 bounds.right() - bounds.width() * 0.16,
-                                 bounds.top() + bounds.height() * 0.2);
+                painter.drawLine(QPointF(bounds.left() + bounds.width() * 0.22,
+                                         bounds.center().y()),
+                                 QPointF(bounds.left() + bounds.width() * 0.43,
+                                         bounds.bottom() - bounds.height() * 0.24));
+                painter.drawLine(QPointF(bounds.left() + bounds.width() * 0.43,
+                                         bounds.bottom() - bounds.height() * 0.24),
+                                 QPointF(bounds.right() - bounds.width() * 0.16,
+                                         bounds.top() + bounds.height() * 0.2));
             }
             painter.restore();
             continue;
@@ -1875,28 +1875,6 @@ void PageView::scrollContentsBy(int dx, int dy)
 void PageView::wheelEvent(QWheelEvent *event)
 {
     if (m_loading || m_interactionBlocked) {
-        event->accept();
-        return;
-    }
-
-    if (m_pressedLinkPage >= 0 && event->button() == Qt::LeftButton) {
-        const int pressedPage = m_pressedLinkPage;
-        const QUrl pressedUrl = m_pressedLinkUrl;
-        const int destinationPage = m_pressedLinkDestinationPage;
-        const QPointF destinationLocation = m_pressedLinkLocation;
-        m_pressedLinkPage = -1;
-        m_pressedLinkUrl = QUrl();
-        m_pressedLinkDestinationPage = -1;
-        m_pressedLinkLocation = QPointF();
-
-        const int releasePage = pageAtViewportPoint(event->position().toPoint());
-        if (releasePage == pressedPage) {
-            if (!pressedUrl.isEmpty())
-                emit externalLinkRequested(pressedUrl);
-            else if (destinationPage >= 0)
-                jumpToPage(destinationPage, destinationLocation);
-        }
-        viewport()->setCursor(Qt::ArrowCursor);
         event->accept();
         return;
     }
@@ -3485,6 +3463,28 @@ void PageView::mouseReleaseEvent(QMouseEvent *event)
                 emit signaturePlacementRequested(page, bounds);
             }
         }
+        event->accept();
+        return;
+    }
+
+    if (m_pressedLinkPage >= 0 && event->button() == Qt::LeftButton) {
+        const int pressedPage = m_pressedLinkPage;
+        const QUrl pressedUrl = m_pressedLinkUrl;
+        const int destinationPage = m_pressedLinkDestinationPage;
+        const QPointF destinationLocation = m_pressedLinkLocation;
+        m_pressedLinkPage = -1;
+        m_pressedLinkUrl = QUrl();
+        m_pressedLinkDestinationPage = -1;
+        m_pressedLinkLocation = QPointF();
+
+        const int releasePage = pageAtViewportPoint(event->position().toPoint());
+        if (releasePage == pressedPage) {
+            if (!pressedUrl.isEmpty())
+                emit externalLinkRequested(pressedUrl);
+            else if (destinationPage >= 0)
+                jumpToPage(destinationPage, destinationLocation);
+        }
+        viewport()->setCursor(Qt::ArrowCursor);
         event->accept();
         return;
     }
