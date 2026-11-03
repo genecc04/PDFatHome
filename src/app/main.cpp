@@ -8,6 +8,7 @@ int main(int argc, char *argv[])
     app.setOrganizationName("PdfApp");
     app.setApplicationName("PdfApp");
     app.setApplicationDisplayName("PDF@home");
+    app.setApplicationVersion(QStringLiteral(APP_VERSION));
     app.setWindowIcon(QIcon(QStringLiteral(":/icons/pdfappicon.png")));
 
     MainWindow window;

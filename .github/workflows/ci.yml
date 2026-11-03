@@ -1,0 +1,286 @@
+name: CI / Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+env:
+  APP_EXE: PDF@home.exe
+  QT_VERSION: "6.8.0"
+  TRIPLET: x64-windows-static-md
+  VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\.vcpkg-cache
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. CHECK: build with AddressSanitizer, open a PDF, and watch for crashes
+  # ---------------------------------------------------------------------------
+  check:
+    name: Check (ASan + smoke run)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtpdf
+          cache: true
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\.vcpkg-cache
+          key: vcpkg-windows-v1
+
+      - name: Install MuPDF and OpenSSL (vcpkg)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
+            "libmupdf:$env:TRIPLET" "openssl:$env:TRIPLET" `
+            "--host-triplet=$env:TRIPLET"
+
+      - name: Configure (RelWithDebInfo + AddressSanitizer)
+        shell: pwsh
+        run: |
+          # ASan does not work with Debug's /RTC1 or incremental linking, so use RelWithDebInfo.
+          # The _DISABLE_* defines avoid STL annotation mismatches against non-ASan libraries.
+          $env:CXXFLAGS = "/fsanitize=address /D_DISABLE_VECTOR_ANNOTATION /D_DISABLE_STRING_ANNOTATION"
+          cmake -S . -B build-asan -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET="$env:TRIPLET" `
+            -DVCPKG_HOST_TRIPLET="$env:TRIPLET" `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
+            -DCMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO="/DEBUG /INCREMENTAL:NO"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build-asan --config RelWithDebInfo --parallel
+
+      - name: Create a sample PDF
+        shell: pwsh
+        run: |
+          @'
+          def stream(text):
+              return f"<< /Length {len(text)} >>\nstream\n{text}\nendstream"
+
+          page = "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents {} 0 R /Resources << /Font << /F1 7 0 R >> >> >>"
+          objs = [
+              "<< /Type /Catalog /Pages 2 0 R >>",
+              "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+              page.format(4),
+              stream("BT /F1 24 Tf 72 700 Td (Hello page one) Tj ET"),
+              page.format(6),
+              stream("BT /F1 24 Tf 72 700 Td (Hello page two) Tj ET"),
+              "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+          ]
+
+          out = "%PDF-1.4\n"
+          offsets = []
+          for i, body in enumerate(objs, 1):
+              offsets.append(len(out.encode()))
+              out += f"{i} 0 obj\n{body}\nendobj\n"
+          xref = len(out.encode())
+          out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n"
+          for off in offsets:
+              out += f"{off:010d} 00000 n \n"
+          out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n"
+          open("sample.pdf", "wb").write(out.encode())
+          '@ | Set-Content -Encoding ascii make_pdf.py
+          python make_pdf.py
+
+      - name: Smoke test (launch, open PDF, run 20 s)
+        shell: pwsh
+        run: |
+          $env:PATH = "$env:QT_ROOT_DIR\bin;$env:PATH"
+          $env:QT_QPA_PLATFORM = "offscreen"        # no display on the runner
+          $env:QT_FORCE_STDERR_LOGGING = "1"        # make qWarning() visible in the log
+          $exe = "build-asan\RelWithDebInfo\$env:APP_EXE"
+          $pdf = (Resolve-Path sample.pdf).Path
+
+          $p = Start-Process -FilePath $exe -ArgumentList "`"$pdf`"" -PassThru -NoNewWindow `
+                 -RedirectStandardOutput out.log -RedirectStandardError err.log
+
+          # A GUI app should still be running after 20 s. If it exited, it crashed
+          # or ASan aborted it.
+          if ($p.WaitForExit(20000)) {
+            Write-Host "App exited early with code $($p.ExitCode)"
+            Get-Content out.log, err.log
+            exit 1
+          }
+          $p.Kill()
+
+          Get-Content out.log, err.log
+          if (Select-String -Path err.log -Pattern "Could not (render|load|open)" -CaseSensitive -Quiet) {
+            Write-Host "The app logged a render/load error."
+            exit 1
+          }
+
+  # ---------------------------------------------------------------------------
+  # 2. BUILD: Release build; on tags, bundle Qt DLLs, make the Inno Setup installer, upload it
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build (Release)
+    needs: check
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtpdf
+          cache: true
+
+      - name: Cache vcpkg binaries
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}\.vcpkg-cache
+          key: vcpkg-windows-v1
+
+      - name: Install MuPDF and OpenSSL (vcpkg)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
+            "libmupdf:$env:TRIPLET" "openssl:$env:TRIPLET" `
+            "--host-triplet=$env:TRIPLET"
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DVCPKG_TARGET_TRIPLET="$env:TRIPLET" `
+            -DVCPKG_HOST_TRIPLET="$env:TRIPLET" `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+
+      - name: Build
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Stage files with windeployqt (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $dist = "dist\PDFhome"
+          New-Item -ItemType Directory -Force $dist | Out-Null
+          Copy-Item "build\Release\$env:APP_EXE" $dist
+
+          # windeployqt copies the Qt DLLs and plugins the exe needs next to it.
+          & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --no-translations --compiler-runtime "$dist\$env:APP_EXE"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          # The app does not use Qt Network/Pdf; drop them if windeployqt pulled them in.
+          foreach ($unused in @("Qt6Network.dll", "Qt6Pdf.dll", "generic\qtuiotouchplugin.dll",
+                                "imageformats\qpdf.dll", "networkinformation", "tls")) {
+            $p = Join-Path $dist $unused
+            if (Test-Path $p) { Remove-Item $p -Recurse -Force }
+          }
+
+          # AGPL / third-party notices ship with the binary.
+          Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md $dist
+          Copy-Item licenses $dist -Recurse
+
+      - name: Create portable ZIP (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force output | Out-Null
+          Compress-Archive -Path "dist\PDFhome\*" -DestinationPath "output\PDFhome-windows.zip" -Force
+
+      - name: Build installer with Inno Setup (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          # Inno Setup is normally preinstalled on the runner; install it if it is missing.
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+          $version = $env:GITHUB_REF_NAME.TrimStart("v")     # v0.1.0 -> 0.1.0
+          & $iscc "/DAppVersion=$version" "/DAppExeName=$env:APP_EXE" installer\PDFhome.iss
+
+      - name: Upload installer (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            output/PDFhome-Setup-*.exe
+            output/PDFhome-windows.zip
+          retention-days: 1
+
+  # ---------------------------------------------------------------------------
+  # 3. RELEASE: create the GitHub Release and attach the installer exe
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-installer
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.exe dist/*.zip \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "PDF@home $GITHUB_REF_NAME" \
+            --generate-notes
+
+  # ---------------------------------------------------------------------------
+  # 4. CLEANUP: delete this run's workflow artifacts once the release exists
+  # ---------------------------------------------------------------------------
+  cleanup:
+    name: Clean up artifacts
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Delete artifacts from this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ids=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].id')
+          for id in $ids; do
+            gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
+          done

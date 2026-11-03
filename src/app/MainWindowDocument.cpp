@@ -5,6 +5,7 @@
 #include "ThumbnailPane.h"
 
 #include <QAction>
+#include <QCoreApplication>
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -482,6 +483,7 @@ void MainWindow::showAbout()
 {
     QMessageBox::about(this, "About PDF@home",
         "<h3>PDF@home</h3>"
+        "<p>Version " + QCoreApplication::applicationVersion() + "</p>"
         "<p>A desktop PDF reader and page editor built with Qt 6 and MuPDF.</p>"
         "<p>Copyright &copy; 2026 genecc04.<br>"
         "This program comes with ABSOLUTELY NO WARRANTY. It is free software, licensed "

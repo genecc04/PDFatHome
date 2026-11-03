@@ -112,8 +112,8 @@ is not identified here as third-party material.
   the applicable obligations for the exact build, including any required
   corresponding source, build materials, and instructions. The packaging
   script does not generate or stage those materials.
-- Release assets are `PDF@home-Setup.exe` (Inno Setup installer) and
-  `PDF@home-windows.zip` (portable). Both must contain the same program files and
+- Release assets are `PDFhome-Setup-<version>.exe` (Inno Setup installer) and
+  `PDFhome-windows.zip` (portable). Both must contain the same program files and
   the same `LICENSE`, `THIRD_PARTY_NOTICES.md`, and `licenses/` folder. The installer
   must install these notices alongside the program, and the Qt DLLs must remain
   separate files that can be replaced with compatible modified versions.

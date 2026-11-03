@@ -1,5 +1,7 @@
 # PDF@home
 
+**Version 1.0**
+
 A desktop PDF reader and editor for Windows, built with C++, Qt 6 and MuPDF.
 MuPDF handles PDF loading, rendering, search and editing; Qt provides the user
 interface.
@@ -32,9 +34,9 @@ web links embedded in a PDF in your default browser after you confirm.
 Get either file from the
 [Releases page](https://github.com/genecc04/offline-pdf-reader-editor/releases):
 
-- **`PDF@home-Setup.exe`** (installer): run it and follow the prompts. It adds a Start
+- **`PDFhome-Setup-1.0.exe`** (installer): run it and follow the prompts. It adds a Start
   menu entry and an uninstaller.
-- **`PDF@home-windows.zip`** (portable): unzip it anywhere and run `PDF@home.exe`. No
+- **`PDFhome-windows.zip`** (portable): unzip it anywhere and run `PDF@home.exe`. No
   installation is needed.
 
 Both contain the same program and license files. Windows SmartScreen may warn about
@@ -129,25 +131,30 @@ cmake --build build --config Debug
 
 ### Packaging a release
 
+Releases are built by [GitHub Actions](.github/workflows/ci.yml). Pushing a tag such as
+`v1.0` builds in Release mode, stages the program with the Qt and MSVC runtimes, the
+README, and the license materials, and publishes `PDFhome-Setup-1.0.exe` (an
+[Inno Setup](https://jrsoftware.org/isinfo.php) installer, see
+[installer/PDFhome.iss](installer/PDFhome.iss)) and `PDFhome-windows.zip` (portable) on
+the Releases page. Keep the tag and the `VERSION` in `CMakeLists.txt` in sync; the
+version shown in **Help > About** comes from `CMakeLists.txt`.
+
+To build a ZIP locally instead:
+
 ```
 powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1
 ```
 
-This builds in Release mode and creates `dist/PDF@home-windows.zip` with the program,
-the Qt and MSVC runtimes, this README, the project and third-party license materials,
-and a distribution notice. If needed, pass `-QtRoot` and `-BuildDir` to match your
-machine. This is a runtime staging archive, not a complete license-compliance package:
-the script does not create the source or build materials that may be required for the
-statically linked MuPDF build. Review [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
-and complete its release checklist before publishing the archive.
+This builds in Release mode and creates `dist/PDF@home-windows.zip`. If needed, pass
+`-QtRoot` and `-BuildDir` to match your machine.
 
-The installer (`PDF@home-Setup.exe`) is built with [Inno Setup](https://jrsoftware.org/isinfo.php)
-from the staged `dist/PDF@home-windows` folder, so run `package.ps1` first. The installer
-must install the same `LICENSE`, `THIRD_PARTY_NOTICES.md`, and `licenses` folder as the
-ZIP, and must leave the Qt DLLs as separate files.
-
-Each GitHub release should publish both files and link to the exact tagged source
-commit, so the corresponding source for the AGPL-licensed components is available.
+Both packages are runtime archives, not complete license-compliance packages: nothing
+creates the source or build materials that may be required for the statically linked
+MuPDF build. Review [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and complete its
+release checklist before publishing. The installer must install the same `LICENSE`,
+`THIRD_PARTY_NOTICES.md`, and `licenses` folder as the ZIP, and must leave the Qt DLLs
+as separate files. Each release should link to the exact tagged source commit, so the
+corresponding source for the AGPL-licensed components is available.
 
 ## Reporting problems
 

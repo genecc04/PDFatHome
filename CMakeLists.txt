@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(PdfApp LANGUAGES CXX RC)
+project(PdfApp VERSION 1.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -57,6 +57,7 @@ target_include_directories(PdfApp PRIVATE
 )
 
 set_target_properties(PdfApp PROPERTIES OUTPUT_NAME "PDF@home")
+target_compile_definitions(PdfApp PRIVATE APP_VERSION="${PROJECT_VERSION}")
 
 target_link_libraries(PdfApp PRIVATE
     Qt6::Widgets
