@@ -76,7 +76,9 @@ bool boundsIntersect(const QRectF &a, const QRectF &b)
            && a.top() <= b.bottom() && a.bottom() >= b.top();
 }
 
-// Annotations made by this app carry an NM name starting with the given prefix.
+constexpr const char *kTextAnnotPrefix = "OfflinePdfReaderText:";
+constexpr const char *kImageAnnotPrefix = "OfflinePdfReaderImage:";
+
 bool annotNameHasPrefix(fz_context *ctx, pdf_annot *annot, const char *prefix)
 {
     const char *name = pdf_to_text_string(
@@ -86,12 +88,12 @@ bool annotNameHasPrefix(fz_context *ctx, pdf_annot *annot, const char *prefix)
 
 bool isAppTextAnnotation(fz_context *ctx, pdf_annot *annot)
 {
-    return annotNameHasPrefix(ctx, annot, "OfflinePdfReaderText:");
+    return annotNameHasPrefix(ctx, annot, kTextAnnotPrefix);
 }
 
 bool isAppImageAnnotation(fz_context *ctx, pdf_annot *annot)
 {
-    return annotNameHasPrefix(ctx, annot, "OfflinePdfReaderImage:");
+    return annotNameHasPrefix(ctx, annot, kImageAnnotPrefix);
 }
 
 bool applyEncryption(pdf_write_options &options, PdfEditor::Encryption mode,
@@ -128,6 +130,22 @@ bool pageHasWidgetAnnots(fz_context *ctx, pdf_document *doc, int pageIndex)
         pdf_obj *subtype = pdf_dict_get(ctx, pdf_array_get(ctx, annots, i),
                                         PDF_NAME(Subtype));
         if (pdf_name_eq(ctx, subtype, PDF_NAME(Widget)))
+            return true;
+    }
+    return false;
+}
+
+bool pageHasAppAnnot(fz_context *ctx, pdf_document *doc, int pageIndex,
+                     const char *prefix)
+{
+    pdf_obj *pageObj = pdf_lookup_page_obj(ctx, doc, pageIndex);
+    pdf_obj *annots = pdf_dict_get(ctx, pageObj, PDF_NAME(Annots));
+    const int count = pdf_array_len(ctx, annots);
+    const size_t prefixLength = std::strlen(prefix);
+    for (int i = 0; i < count; ++i) {
+        pdf_obj *annot = pdf_array_get(ctx, annots, i);
+        const char *name = pdf_to_text_string(ctx, pdf_dict_gets(ctx, annot, "NM"));
+        if (name && std::strncmp(name, prefix, prefixLength) == 0)
             return true;
     }
     return false;
@@ -1216,7 +1234,7 @@ bool PdfEditor::addTextBox(int pageIndex, const QRectF &box, const QString &text
     const QByteArray textUtf8 = text.toUtf8();
     const QByteArray fontUtf8 = fontName.toUtf8();
     const QByteArray annotationName =
-        QStringLiteral("OfflinePdfReaderText:")
+        QString::fromLatin1(kTextAnnotPrefix)
         .append(QUuid::createUuid().toString(QUuid::WithoutBraces)).toUtf8();
     const char *cText = textUtf8.constData();
     const char *cFont = fontUtf8.constData();
@@ -1270,6 +1288,20 @@ bool PdfEditor::textAnnotationAt(int pageIndex, const QPointF &point,
         m_error = "No text annotation result was provided.";
         return false;
     }
+
+    bool mayHaveAppAnnot = true;
+    fz_var(mayHaveAppAnnot);
+    fz_try(m_ctx)
+    {
+        mayHaveAppAnnot = pageHasAppAnnot(m_ctx, m_doc, pageIndex, kTextAnnotPrefix);
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return false;
+    }
+    if (!mayHaveAppAnnot)
+        return false;
 
     pdf_page *page = nullptr;
     bool found = false;
@@ -1728,7 +1760,7 @@ bool PdfEditor::addImageStamp(int pageIndex, const QRectF &box, const QByteArray
     const fz_rect rect = fz_make_rect(float(box.left()), float(box.top()),
                                       float(box.right()), float(box.bottom()));
     const QByteArray annotationName =
-        QStringLiteral("OfflinePdfReaderImage:")
+        QString::fromLatin1(kImageAnnotPrefix)
             .append(QUuid::createUuid().toString(QUuid::WithoutBraces)).toUtf8();
 
     clearSelectionTextCache();
@@ -1785,6 +1817,20 @@ bool PdfEditor::imageStampAt(int pageIndex, const QPointF &point, ImageStamp *st
         m_error = "No image stamp result was provided.";
         return false;
     }
+
+    bool mayHaveAppAnnot = true;
+    fz_var(mayHaveAppAnnot);
+    fz_try(m_ctx)
+    {
+        mayHaveAppAnnot = pageHasAppAnnot(m_ctx, m_doc, pageIndex, kImageAnnotPrefix);
+    }
+    fz_catch(m_ctx)
+    {
+        m_error = QString::fromUtf8(fz_caught_message(m_ctx));
+        return false;
+    }
+    if (!mayHaveAppAnnot)
+        return false;
 
     pdf_page *page = nullptr;
     pdf_annot *annot = nullptr;

@@ -76,7 +76,11 @@ advice if you need a determination of how the license applies to this project.
 
 ## Build and packaging tools
 
-The development workflow uses CMake, Visual Studio/MSVC, and vcpkg. The package
+The development workflow uses CMake, Visual Studio/MSVC, and vcpkg. The release
+installer is built with [Inno Setup](https://jrsoftware.org/isinfo.php), which is
+used only as a build tool; its setup stub is embedded in the generated installer.
+Review Inno Setup's license (<https://jrsoftware.org/files/is/license.txt>) and
+confirm that its terms permit distributing the installer it generates. The package
 manager and build tools are not linked into the application by this project.
 The vcpkg CMake helper ports and Meson are build-time dependencies in the
 installed vcpkg environment; they are not listed above as application runtime
@@ -95,10 +99,28 @@ is not identified here as third-party material.
 - For a source-only repository, keep this inventory and the referenced license
   texts with the project. This does not determine whether every aspect of a
   source publication complies with every applicable license.
-- Before distributing an executable, create and review a dependency inventory
-  for the exact build, include all required notices and license texts, and
-  address the applicable obligations for the dynamically linked Qt libraries,
-  statically linked MuPDF, OpenSSL, and their dependencies.
+- For a binary release, inspect the staged archive and create a dependency
+  inventory for that exact build, including the Qt libraries, plugins, and
+  other runtime files actually included. This development snapshot is not a
+  substitute for that release-specific inventory.
+- Confirm the redistribution terms for the exact Qt modules and dependencies,
+  include their applicable notices and license texts, and preserve the
+  applicable rights for users of the dynamically linked Qt libraries. The
+  packaging script stages the repository's current license materials; verify
+  they cover the exact release build.
+- Before distributing the statically linked MuPDF build, determine and meet
+  the applicable obligations for the exact build, including any required
+  corresponding source, build materials, and instructions. The packaging
+  script does not generate or stage those materials.
+- Release assets are `PDF@home-Setup.exe` (Inno Setup installer) and
+  `PDF@home-windows.zip` (portable). Both must contain the same program files and
+  the same `LICENSE`, `THIRD_PARTY_NOTICES.md`, and `licenses/` folder. The installer
+  must install these notices alongside the program, and the Qt DLLs must remain
+  separate files that can be replaced with compatible modified versions.
+- For each release, link the exact tagged source commit in the release notes (or
+  attach a source archive) and keep the build instructions in `README.md` accurate
+  for that tag, so the corresponding source for the AGPL-licensed components
+  (this project, MuPDF, jbig2dec) is available to recipients.
 - Recheck this file whenever Qt, vcpkg, MuPDF, OpenSSL, the triplet, or enabled
   features change. Do not rely on this development-build snapshot as a release
   SBOM.

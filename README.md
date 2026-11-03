@@ -29,16 +29,26 @@ web links embedded in a PDF in your default browser after you confirm.
 
 ## Download
 
-Get `PDF@home-windows.zip` from the
-[Releases page](https://github.com/genecc04/offline-pdf-reader-editor/releases),
-unzip it anywhere, and run `PDF@home.exe`. No installer is needed.
+Get either file from the
+[Releases page](https://github.com/genecc04/offline-pdf-reader-editor/releases):
 
-**Keep all the files in the folder together.** `PDF@home.exe` needs the Qt libraries that
-come with it and does not run on its own.
+- **`PDF@home-Setup.exe`** (installer): run it and follow the prompts. It adds a Start
+  menu entry and an uninstaller.
+- **`PDF@home-windows.zip`** (portable): unzip it anywhere and run `PDF@home.exe`. No
+  installation is needed.
 
-It also needs the
-[Microsoft Visual C++ Redistributable (x64)](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist),
-which most computers already have.
+Both contain the same program and license files. Windows SmartScreen may warn about
+an unrecognized publisher because the files are not code-signed; choose **More info >
+Run anyway** if you trust the download.
+
+**Keep all the files in the portable folder together.** `PDF@home.exe` needs the Qt
+libraries that come with it and does not run on its own. The release packaging also
+deploys the MSVC runtime alongside the application. If you build or repackage the app
+without those runtime files, install the
+[Microsoft Visual C++ Redistributable (x64)](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist).
+
+Uninstalling removes the program files. Settings and saved e-signatures stored in your
+user profile are not part of the installation.
 
 ## Keyboard shortcuts
 
@@ -124,11 +134,20 @@ powershell -ExecutionPolicy Bypass -File .\scripts\package.ps1
 ```
 
 This builds in Release mode and creates `dist/PDF@home-windows.zip` with the program,
-the dynamically linked Qt runtime, and the repository's license materials. If needed,
-pass `-QtRoot` and `-BuildDir` to match your machine. The script does not create the
-source materials required for distributing the statically linked MuPDF build. Review
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and complete those release-specific
-steps before distributing the archive.
+the Qt and MSVC runtimes, this README, the project and third-party license materials,
+and a distribution notice. If needed, pass `-QtRoot` and `-BuildDir` to match your
+machine. This is a runtime staging archive, not a complete license-compliance package:
+the script does not create the source or build materials that may be required for the
+statically linked MuPDF build. Review [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+and complete its release checklist before publishing the archive.
+
+The installer (`PDF@home-Setup.exe`) is built with [Inno Setup](https://jrsoftware.org/isinfo.php)
+from the staged `dist/PDF@home-windows` folder, so run `package.ps1` first. The installer
+must install the same `LICENSE`, `THIRD_PARTY_NOTICES.md`, and `licenses` folder as the
+ZIP, and must leave the Qt DLLs as separate files.
+
+Each GitHub release should publish both files and link to the exact tagged source
+commit, so the corresponding source for the AGPL-licensed components is available.
 
 ## Reporting problems
 
