@@ -239,10 +239,14 @@ jobs:
             -replace '@VERSION@', $ver |
             Set-Content "$stage\AppxManifest.xml" -Encoding utf8
 
-          $sdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.*\x64" -Directory |
-                 Sort-Object Name -Descending | Select-Object -First 1
+          # Sort by numeric version (text sort ranks 10.0.14393.0 above 10.0.26100.0) and
+          # skip SDK folders that do not ship makeappx.exe
+          $makeappx = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.*\x64\makeappx.exe" |
+                      Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+                      Select-Object -First 1
+          if (-not $makeappx) { throw 'makeappx.exe not found in the Windows SDK' }
           New-Item -ItemType Directory -Force output | Out-Null
-          & "$($sdk.FullName)\makeappx.exe" pack /d $stage /p output\PDFhome.msix /o
+          & $makeappx.FullName pack /d $stage /p output\PDFhome.msix /o
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build installer with Inno Setup (tags only)

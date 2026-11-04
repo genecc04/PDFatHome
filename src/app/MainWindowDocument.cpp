@@ -490,8 +490,8 @@ void MainWindow::showAbout()
         "under the <a href=\"https://www.gnu.org/licenses/agpl-3.0.html\">"
         "GNU Affero General Public License v3.0</a>, and you are welcome to "
         "redistribute it under its conditions.</p>"
-        "<p>Source code: <a href=\"https://github.com/genecc04/offline-pdf-reader-editor\">"
-        "github.com/genecc04/offline-pdf-reader-editor</a></p>"
+        "<p>Source code: <a href=\"https://github.com/genecc04/PDFatHome\">"
+        "github.com/genecc04/PDFatHome</a></p>"
         "<p>Uses MuPDF (Artifex Software, Inc.) and Qt. See THIRD_PARTY_NOTICES.md.</p>");
 }
 

@@ -32,7 +32,7 @@ web links embedded in a PDF in your default browser after you confirm.
 ## Download
 
 Get either file from the
-[Releases page](https://github.com/genecc04/offline-pdf-reader-editor/releases):
+[Releases page](https://github.com/genecc04/PDFatHome/releases):
 
 - **`PDFhome-Setup-1.0.exe`** (installer): run it and follow the prompts. It adds a Start
   menu entry and an uninstaller.
@@ -159,7 +159,7 @@ corresponding source for the AGPL-licensed components is available.
 ## Reporting problems
 
 Found a bug? Please open an
-[issue](https://github.com/genecc04/offline-pdf-reader-editor/issues) and say which
+[issue](https://github.com/genecc04/PDFatHome/issues) and say which
 Windows version you use and what you were doing. If you can share a PDF that shows the
 problem, that helps a lot.
 
