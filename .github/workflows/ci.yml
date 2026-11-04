@@ -136,7 +136,8 @@ jobs:
           }
 
   # ---------------------------------------------------------------------------
-  # 2. BUILD: Release build; on tags, bundle Qt DLLs, make the Inno Setup installer, upload it
+  # 2. BUILD: Release build; on tags, bundle Qt DLLs, make the Inno Setup
+  #    installer, the portable ZIP and the MSIX package, and upload them
   # ---------------------------------------------------------------------------
   build:
     name: Build (Release)
@@ -216,6 +217,34 @@ jobs:
           New-Item -ItemType Directory -Force output | Out-Null
           Compress-Archive -Path "dist\PDFhome\*" -DestinationPath "output\PDFhome-windows.zip" -Force
 
+      - name: Build MSIX package (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $stage = "$env:RUNNER_TEMP\msix-stage"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+
+          # Reuse the files already staged for the installer; rename the exe (no "@" in the package)
+          Copy-Item "dist\PDFhome\*" $stage -Recurse
+          Rename-Item -LiteralPath "$stage\$env:APP_EXE" -NewName "PDFhome.exe"
+
+          # The vc_redist installer is for Inno; the MSIX uses the VCLibs dependency instead
+          Remove-Item "$stage\vc_redist*.exe" -ErrorAction SilentlyContinue
+
+          Copy-Item packaging\msix\Assets "$stage\Assets" -Recurse
+
+          # Tag v1.1.0 becomes 1.1.0.0 (four parts; the Store needs the last to be 0)
+          $ver = "$($env:GITHUB_REF_NAME.TrimStart('v')).0"
+          (Get-Content packaging\msix\AppxManifest.xml -Raw) `
+            -replace '@VERSION@', $ver |
+            Set-Content "$stage\AppxManifest.xml" -Encoding utf8
+
+          $sdk = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.*\x64" -Directory |
+                 Sort-Object Name -Descending | Select-Object -First 1
+          New-Item -ItemType Directory -Force output | Out-Null
+          & "$($sdk.FullName)\makeappx.exe" pack /d $stage /p output\PDFhome.msix /o
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Build installer with Inno Setup (tags only)
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -239,6 +268,14 @@ jobs:
             output/PDFhome-Setup-*.exe
             output/PDFhome-windows.zip
           retention-days: 1
+
+      - name: Upload MSIX (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-msix
+          path: output/PDFhome.msix
+          retention-days: 30
 
   # ---------------------------------------------------------------------------
   # 3. RELEASE: create the GitHub Release and attach the installer exe
@@ -267,6 +304,7 @@ jobs:
 
   # ---------------------------------------------------------------------------
   # 4. CLEANUP: delete this run's workflow artifacts once the release exists
+  #    (the MSIX artifact is kept so you can upload it to Partner Center)
   # ---------------------------------------------------------------------------
   cleanup:
     name: Clean up artifacts
@@ -280,7 +318,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ids=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[].id')
+          ids=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts" --jq '.artifacts[] | select(.name != "windows-msix") | .id')
           for id in $ids; do
             gh api -X DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$id"
           done
