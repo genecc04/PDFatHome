@@ -24,6 +24,7 @@
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSpinBox>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
@@ -134,8 +135,23 @@ void MainWindow::openFile()
     if (!confirmDiscard())
         return;
 
+    QString initialDirectory;
+    const QStringList recentFiles = QSettings().value("recentFiles").toStringList();
+    for (const QString &recentFile : recentFiles) {
+        const QFileInfo info(recentFile);
+        if (info.exists() && info.isFile()) {
+            initialDirectory = info.absolutePath();
+            break;
+        }
+    }
+    if (initialDirectory.isEmpty()) {
+        initialDirectory = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+        if (initialDirectory.isEmpty())
+            initialDirectory = QDir::homePath();
+    }
+
     const QString path = QFileDialog::getOpenFileName(
-        this, "Open PDF", QString(), "PDF files (*.pdf)");
+        this, "Open PDF", initialDirectory, "PDF files (*.pdf)");
     if (path.isEmpty())
         return;
 

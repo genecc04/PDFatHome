@@ -31,7 +31,9 @@ web links embedded in a PDF in your default browser after you confirm.
 
 ## Download
 
-Get either file from the
+Get PDF@home from the [Microsoft Store](https://apps.microsoft.com/detail/9P25R3SQG4VP?hl=en-us&gl=PH&ocid=pdpshare).
+
+Or get either file from the
 [Releases page](https://github.com/genecc04/PDFatHome/releases):
 
 - **`PDFhome-Setup-1.0.exe`** (installer): run it and follow the prompts. It adds a Start
