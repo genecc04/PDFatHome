@@ -46,9 +46,8 @@ MainWindow::MainWindow(QWidget *parent)
     setupMenus();
     setupToolbar();
     setupImageToolbar();
-    setupTextToolbar();
-    setupDrawToolbar();
-    setupMarkupToolbar();
+    setupToolsToolbar();
+    setupToolsPane();
     updateActions();
 
     setAcceptDrops(true);
@@ -58,7 +57,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     QSettings settings;
     restoreGeometry(settings.value("window/geometry").toByteArray());
-    restoreState(settings.value("window/state").toByteArray(), 1);
+    restoreState(settings.value("window/state").toByteArray(), 2);
 }
 
 MainWindow::~MainWindow()
@@ -122,7 +121,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
 
     QSettings settings;
     settings.setValue("window/geometry", saveGeometry());
-    settings.setValue("window/state", saveState(1));
+    settings.setValue("window/state", saveState(2));
     m_closing = true;
     event->accept();
 }
@@ -166,6 +165,8 @@ void MainWindow::updateActions()
     const int pendingEdits = reconstruction->pendingCount();
     if (m_reconstructAction) {
         m_reconstructAction->setEnabled(editable);
+        // Stays on through a short edit operation (Apply reconstruction runs one);
+        // goes off only when the document can't be edited at all.
         const bool unavailable = !m_editor || m_viewOnly || m_documentLoadPending
                                  || signedDocument;
         if (unavailable && m_reconstructAction->isChecked())
@@ -177,6 +178,8 @@ void MainWindow::updateActions()
     if (m_discardReconstructionAction)
         m_discardReconstructionAction->setEnabled(editable && pendingEdits > 0);
 
+    // Undo takes back pending reconstruct edits one by one before it touches the
+    // saved history; Redo waits until there are none.
     m_undoAction->setEnabled(editable && (m_history.canUndo() || m_view->hasPendingStrokes()
                                           || pendingEdits > 0));
     m_redoAction->setEnabled(editable && m_history.canRedo() && pendingEdits == 0);

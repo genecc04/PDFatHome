@@ -70,7 +70,8 @@ private:
     void setupMenus();
     void setupToolbar();
     void setupImageToolbar();
-    void setupTextToolbar();
+    void setupToolsToolbar();
+    void setupToolsPane();
 
     // file and viewing
     void openFile();
@@ -131,8 +132,6 @@ private:
                           bool preserveRasterPreviews = false);
     bool refreshAfterPageEdit(const QList<int> &changedPages, int page);
     QList<int> targetPages() const;
-    void setupDrawToolbar();
-    void setupMarkupToolbar();
     void placeStrokes(const QVector<PageView::Stroke> &strokes);
     void eraseInk(int page, const QVector<QPointF> &path, double radius);
     void addImage();
@@ -172,7 +171,9 @@ private:
     QDockWidget *m_searchDock = nullptr;
     BookmarkPane *m_bookmarks = nullptr;
     QDockWidget *m_bookmarksDock = nullptr;
+    QDockWidget *m_toolsDock = nullptr;
     QMenu *m_recentMenu = nullptr;
+    QMenu *m_viewMenu = nullptr;
 
     QAction *m_saveAction = nullptr;
     QAction *m_saveAsAction = nullptr;
@@ -211,13 +212,15 @@ private:
     QAction *m_applyReconstructionAction = nullptr;
     QAction *m_discardReconstructionAction = nullptr;
 
+    // The text toolbar's controls. They style new text boxes and, while a
+    // reconstructed region is being edited, the text in its editor.
     QComboBox *m_fontBox = nullptr;
     QSpinBox *m_fontSizeBox = nullptr;
     ColorMenuButton *m_textColorButton = nullptr;
     QAction *m_boldAction = nullptr;
     QAction *m_italicAction = nullptr;
     QAction *m_underlineAction = nullptr;
-    PageView::TextStyle m_textBoxStyle;
+    PageView::TextStyle m_textBoxStyle; // what the toolbar means for NEW text boxes
     ReconstructionController *m_reconstruction = nullptr;
 
     std::unique_ptr<PdfEditor> m_editor;

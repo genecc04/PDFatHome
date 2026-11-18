@@ -28,7 +28,7 @@ jobs:
   check:
     name: Check (ASan + smoke run)
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -45,19 +45,32 @@ jobs:
           modules: qtpdf
           cache: true
 
-      - name: Cache vcpkg binaries
-        uses: actions/cache@v4
+      # The cache is restored here and saved right after the install below, instead of
+      # with actions/cache's automatic save. That one saves only when the whole job
+      # succeeds and only when the key was missing, so packages added later (Tesseract)
+      # would be rebuilt on every run. Bump the number in the key to start a fresh cache.
+      - name: Restore vcpkg binaries
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}\.vcpkg-cache
-          key: vcpkg-windows-v1
+          key: vcpkg-windows-${{ env.TRIPLET }}-mupdf-openssl-tesseract-v1
 
-      - name: Install MuPDF and OpenSSL (vcpkg)
+      - name: Install MuPDF, OpenSSL and Tesseract (vcpkg)
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
-            "libmupdf:$env:TRIPLET" "openssl:$env:TRIPLET" `
+            "libmupdf:$env:TRIPLET" "openssl:$env:TRIPLET" "tesseract:$env:TRIPLET" `
             "--host-triplet=$env:TRIPLET"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save vcpkg binaries
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}\.vcpkg-cache
+          key: vcpkg-windows-${{ env.TRIPLET }}-mupdf-openssl-tesseract-v1
 
       - name: Configure (RelWithDebInfo + AddressSanitizer)
         shell: pwsh
@@ -136,14 +149,14 @@ jobs:
           }
 
   # ---------------------------------------------------------------------------
-  # 2. BUILD: Release build; on tags, bundle Qt DLLs, make the Inno Setup
+  # 2. BUILD: Release build; on tags, bundle Qt DLLs, OCR data, make the Inno Setup
   #    installer, the portable ZIP and the MSIX package, and upload them
   # ---------------------------------------------------------------------------
   build:
     name: Build (Release)
     needs: check
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -160,19 +173,32 @@ jobs:
           modules: qtpdf
           cache: true
 
-      - name: Cache vcpkg binaries
-        uses: actions/cache@v4
+      # The cache is restored here and saved right after the install below, instead of
+      # with actions/cache's automatic save. That one saves only when the whole job
+      # succeeds and only when the key was missing, so packages added later (Tesseract)
+      # would be rebuilt on every run. Bump the number in the key to start a fresh cache.
+      - name: Restore vcpkg binaries
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}\.vcpkg-cache
-          key: vcpkg-windows-v1
+          key: vcpkg-windows-${{ env.TRIPLET }}-mupdf-openssl-tesseract-v1
 
-      - name: Install MuPDF and OpenSSL (vcpkg)
+      - name: Install MuPDF, OpenSSL and Tesseract (vcpkg)
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
           & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install `
-            "libmupdf:$env:TRIPLET" "openssl:$env:TRIPLET" `
+            "libmupdf:$env:TRIPLET" "openssl:$env:TRIPLET" "tesseract:$env:TRIPLET" `
             "--host-triplet=$env:TRIPLET"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Save vcpkg binaries
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}\.vcpkg-cache
+          key: vcpkg-windows-${{ env.TRIPLET }}-mupdf-openssl-tesseract-v1
 
       - name: Configure
         shell: pwsh
@@ -209,6 +235,28 @@ jobs:
           # AGPL / third-party notices ship with the binary.
           Copy-Item LICENSE, THIRD_PARTY_NOTICES.md, README.md $dist
           Copy-Item licenses $dist -Recurse
+
+          # The copyright/license file of every vcpkg library in this build (MuPDF,
+          # OpenSSL, Tesseract, Leptonica and what they pull in), so the notices
+          # always match what was linked. vcpkg's own build-helper ports are skipped.
+          $vcpkgLicenses = Join-Path $dist "licenses\vcpkg"
+          New-Item -ItemType Directory -Force $vcpkgLicenses | Out-Null
+          Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT\installed\$env:TRIPLET\share" -Directory |
+            Where-Object { $_.Name -notlike "vcpkg-*" } |
+            ForEach-Object {
+              $copyright = Join-Path $_.FullName "copyright"
+              if (Test-Path $copyright) {
+                Copy-Item $copyright (Join-Path $vcpkgLicenses "$($_.Name)-copyright.txt") -Force
+              }
+            }
+
+          # OCR language data. CMake copies the repo's tessdata folder next to the exe
+          # after the build; without it, OCR of scanned pages is off in this release.
+          if (Test-Path "build\Release\tessdata") {
+            Copy-Item "build\Release\tessdata" $dist -Recurse
+          } else {
+            Write-Host "::warning::tessdata/ is not in the repo, so this release has no OCR language data."
+          }
 
       - name: Create portable ZIP (tags only)
         if: startsWith(github.ref, 'refs/tags/v')

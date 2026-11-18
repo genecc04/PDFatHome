@@ -80,6 +80,7 @@ public:
     explicit PageView(QWidget *parent = nullptr);
     ~PageView() override;
 
+    // pageSizes, when its length matches the page count, saves asking the document for them.
     void setDocument(PdfEditor *document, bool preserveRasterPreviews = false,
                      const QVector<QSizeF> &pageSizes = {});
     void setLoading(bool loading);
@@ -123,6 +124,7 @@ public:
     void setFormFields(int page, const QVector<FormField> &fields);
     void clearFormFieldOverlays();
     bool hasPendingChanges() const;
+    bool isTextEditorOpen() const { return m_editor != nullptr; }
     ReconstructionOverlay *reconstruction() const { return m_reconstruction; }
     void setImageCropMode(bool active);
     void cancelImagePlacement();
@@ -134,6 +136,8 @@ public:
     bool hasRedactionAreas() const { return !m_redactionAreas.isEmpty(); }
     QVector<PdfEditor::RedactionArea> redactionAreas() const { return m_redactionAreas; }
     void clearRedactionAreas();
+    void removeRedactionArea(int index);
+    void setHighlightedRedactionArea(int index);
     void setEraserActive(bool active);
     void setInkStrokeHandler(
         const std::function<bool(int, QVector<Stroke> *)> &handler);
@@ -232,6 +236,8 @@ private:
         int page = -1;
         QList<QPolygonF> bounds;
         QString text;
+        // The range this part covers on its page. Parts far from the viewport
+        // are left unresolved until they are painted or copied.
         QPointF start;
         QPointF end;
         bool resolved = true;
@@ -423,6 +429,7 @@ private:
     QPointF m_redactionStart;
     QRectF m_redactionPreview;
     QVector<PdfEditor::RedactionArea> m_redactionAreas;
+    int m_redactionHighlight = -1;
 
     bool m_signatureTool = false;
     bool m_signatureDrawing = false;

@@ -2,9 +2,9 @@
 
 **Version 1.0**
 
-A desktop PDF reader and editor for Windows, built with C++, Qt 6 and MuPDF.
+A desktop PDF reader and editor for Windows, built with C++, Qt 6, MuPDF and Tesseract.
 MuPDF handles PDF loading, rendering, search and editing; Qt provides the user
-interface.
+interface; Tesseract reads the text on scanned pages (OCR) so it can be edited.
 Everything happens on your computer: your files are never uploaded. The app only opens
 web links embedded in a PDF in your default browser after you confirm.
 
@@ -20,10 +20,20 @@ web links embedded in a PDF in your default browser after you confirm.
 - Redact selected content in a separate copy
 - Export pages as PNG or SVG
 
+**Editing existing text**
+- Reconstruct mode outlines the text on the current page, using the page's own text or
+  OCR (Tesseract) on scanned pages; click a region to change its wording, font, size,
+  color, or position
+- Edits wait as a preview until you choose Apply reconstruction, which writes them into
+  the PDF as real, selectable text and leaves the mode; Undo steps back through the
+  waiting edits
+
 **Marking up and filling out**
 - Fill PDF forms; add and edit text, highlights, drawings, and images
 - Create visual E-signatures by typing, drawing, or uploading; save and manage them locally
 - Move, resize, crop, or delete added images and signatures
+- Tool options (font and size, pen and highlighter settings, the list of marked
+  redaction areas) are in the Tools pane on the right
 
 **Security**
 - Set or remove AES-256 passwords; digitally sign with an RSA certificate
@@ -46,7 +56,9 @@ an unrecognized publisher because the files are not code-signed; choose **More i
 Run anyway** if you trust the download.
 
 **Keep all the files in the portable folder together.** `PDF@home.exe` needs the Qt
-libraries that come with it and does not run on its own. The release packaging also
+libraries that come with it and does not run on its own. OCR of scanned pages
+needs the `tessdata` folder next to the exe; without it the app still works, but only
+on pages that have their own text. The release packaging also
 deploys the MSVC runtime alongside the application. If you build or repackage the app
 without those runtime files, install the
 [Microsoft Visual C++ Redistributable (x64)](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist).
@@ -71,6 +83,9 @@ user profile are not part of the installation.
 | Add image | Ctrl+I |
 | Zoom | Ctrl + mouse wheel |
 | Cancel what you are placing | Esc |
+| Finish editing a text box | Ctrl+Enter |
+| Bold / italic / underline while editing text | Ctrl+B / Ctrl+I / Ctrl+U |
+| Nudge text in reconstruct mode (Shift for bigger steps) | Alt + arrow keys |
 
 ## Known limitations
 
@@ -93,9 +108,19 @@ user profile are not part of the installation.
 - Use **View > Verify digital signatures** to check signature integrity and detect
   changes since signing. PDF@home does not verify certificate trust chains; use a trusted
   PDF reader for that assessment.
-- Added text uses only the standard PDF fonts Helvetica, Times, and Courier for
-  cross-viewer compatibility.
-- Scanned PDFs have no text to select or search (there is no OCR).
+- Text boxes you add use only the standard PDF fonts Helvetica, Times, and Courier for
+  cross-viewer compatibility. Text written by reconstruct mode uses the PDF's own font
+  when it is installed on your computer as a plain TrueType font that allows embedding
+  (Windows only); otherwise it falls back to the matching standard font.
+- Reconstruct mode writes text in the Windows-1252 character set only. Any other
+  character (Cyrillic, Greek, CJK...) is replaced with "?".
+- On a scanned page, reconstruct mode covers the old text with a flat color estimated
+  from the scan, which can look patchy over photos or gradients. On pages with their
+  own text, only the old letters are removed.
+- OCR uses English language data only, and its accuracy depends on the scan.
+- Scanned PDFs still have no text to select, copy, or search. OCR runs only in
+  reconstruct mode, to find regions you can edit; it does not make the rest of the page
+  searchable.
 - Inserting pages from a password-protected PDF is not supported.
 - Bookmarks are not updated after you delete or reorder pages.
 - Reordered or extracted files lose their accessibility tagging.
@@ -106,14 +131,22 @@ user profile are not part of the installation.
 Requirements: CMake 3.21+, a C++17 compiler (developed with MSVC), Qt 6 Widgets,
 and [vcpkg](https://github.com/microsoft/vcpkg).
 The development build was tested with Qt 6.8.0 for MSVC 2022 and MuPDF 1.26.10
-from vcpkg. QMake reports version 3.1 with that Qt installation; this project uses
+and Tesseract from vcpkg. QMake reports version 3.1 with that Qt installation; this project uses
 CMake to configure and build.
 
-Install MuPDF and OpenSSL with vcpkg:
+Install MuPDF, OpenSSL and Tesseract with vcpkg (Tesseract brings in Leptonica and the
+image libraries it needs):
 
 ```
-vcpkg install libmupdf openssl --triplet=x64-windows-static-md --host-triplet=x64-windows-static-md
+vcpkg install libmupdf openssl tesseract --triplet=x64-windows-static-md --host-triplet=x64-windows-static-md
 ```
+
+For OCR, put the language data in a `tessdata` folder at the top of the repository
+(`eng.traineddata` from the
+[tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast) repository, or from the
+full tessdata one). CMake copies that folder next to the program after every build.
+Without it the build still succeeds (CMake prints a warning) and reconstruct mode still
+works on pages that have their own text, but scanned pages cannot be recognized.
 
 Then configure and build, adjusting the paths to your machine:
 
@@ -128,18 +161,25 @@ cmake --build build --config Debug
 - `src/pdf`: PDF editing backend
 - `src/ui`: document view, panels, dialogs, and UI helpers
 - `src/core`: shared application logic such as edit history
+- `modules/pdf-reconstruction`: finds the text on a page (its own text layer, or OCR
+  with Tesseract), groups it into paragraphs, and lays out edited text; built as a
+  static library
 - `resources`: application icons and Qt/Windows resource files
+- `tessdata`: OCR language data, copied next to the program after each build
 - `scripts`: development and packaging scripts
 
 ### Packaging a release
 
 Releases are built by [GitHub Actions](.github/workflows/ci.yml). Pushing a tag such as
 `v1.0` builds in Release mode, stages the program with the Qt and MSVC runtimes, the
-README, and the license materials, and publishes `PDFhome-Setup-1.0.exe` (an
+OCR language data, the README, and the license materials (including the copyright file
+of every vcpkg library in the build), and publishes `PDFhome-Setup-1.0.exe` (an
 [Inno Setup](https://jrsoftware.org/isinfo.php) installer, see
 [installer/PDFhome.iss](installer/PDFhome.iss)) and `PDFhome-windows.zip` (portable) on
 the Releases page. Keep the tag and the `VERSION` in `CMakeLists.txt` in sync; the
-version shown in **Help > About** comes from `CMakeLists.txt`.
+version shown in **Help > About** comes from `CMakeLists.txt`. The workflow also builds
+`PDFhome.msix` and keeps it as a workflow artifact for upload to Partner Center; it is
+not attached to the Release.
 
 To build a ZIP locally instead:
 
@@ -170,8 +210,10 @@ problem, that helps a lot.
 This project is licensed under the **GNU Affero General Public License v3.0**.
 See [LICENSE](LICENSE). Copyright (C) 2026 genecc04.
 
-It uses [Qt](https://www.qt.io) (LGPL-3.0) and [MuPDF](https://mupdf.com)
-(AGPL-3.0, Artifex Software, Inc.), among other libraries. The known dependency
+It uses [Qt](https://www.qt.io) (LGPL-3.0), [MuPDF](https://mupdf.com)
+(AGPL-3.0, Artifex Software, Inc.), and
+[Tesseract](https://github.com/tesseract-ocr/tesseract) (Apache-2.0), among other
+libraries. The known dependency
 inventory and available license texts are documented in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the [licenses](licenses/)
 folder.

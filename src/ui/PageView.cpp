@@ -700,6 +700,7 @@ void PageView::discardQueuedPageRenders()
 
 std::array<RasterStore *, 3> PageView::rasterStores()
 {
+    // Base, page, tile: the order the shared budget breaks eviction ties in.
     return { &m_baseStore, &m_pageStore, &m_tileStore };
 }
 
@@ -740,6 +741,8 @@ void PageView::enforcePageRasterBudget()
 
     int evicted = 0;
     if (rasterCostKilobytes() > m_sharedRasterBudgetKilobytes) {
+        // Gather the cached rasters once, then evict from the farthest page
+        // inward, one page at a time.
         struct Entry {
             int page;
             int distance;
@@ -777,6 +780,8 @@ void PageView::enforcePageRasterBudget()
     }
 }
 
+// A tiled page needs every visible tile cached at once. With a smaller cache
+// the tiles evict each other and parts of the page stay blank or out of date.
 void PageView::reserveTileCache(int visibleTiles)
 {
     constexpr int tileKilobytes = kPageTileSize * kPageTileSize * 4 / 1024;
@@ -1063,6 +1068,8 @@ QPixmap PageView::pageTile(int page, const QSize &fullSize, int tileX, int tileY
     return cached ? *cached : QPixmap();
 }
 
+// Returns the cached raster for key (possibly stale), and starts a background
+// render when it is missing or stale and no failure or render is outstanding.
 const QPixmap *PageView::rasterFor(RasterStore &store, const RasterKey &key,
                                    const QSize &renderSize, const QRectF &pageRegion,
                                    qreal dpr)
@@ -1280,6 +1287,8 @@ void PageView::appendErasedInk(QPainterPath &erasedInk, const QVector<Stroke> &s
     }
 }
 
+// The page itself: white backing, the rendered page (or its tiles), and the
+// eraser preview that shows the page without the ink being erased.
 void PageView::drawPageRaster(QPainter &painter, int page, const QRect &target,
                               const QRect &exposed, qreal dpr)
 {
@@ -1349,6 +1358,7 @@ void PageView::drawSelectionHighlight(QPainter &painter, int page, const QRect &
     }
 }
 
+// Shows a text box at its new bounds while the page raster still has it at the old ones.
 void PageView::drawTextAnnotationPreview(QPainter &painter, int page, const QRect &target,
                                          qreal dpr, const QRectF &oldBounds,
                                          const QRectF &newBounds, const QString &text,
@@ -1398,6 +1408,7 @@ void PageView::drawImageStampPreview(QPainter &painter, int page, const QRect &t
     }
 }
 
+// Everything drawn over a page: selections, in-progress edits, ink and tool previews.
 void PageView::drawPageOverlays(QPainter &painter, int page, const QRect &target, qreal dpr)
 {
     painter.save();
@@ -1471,8 +1482,14 @@ void PageView::drawPageOverlays(QPainter &painter, int page, const QRect &target
 
     const QColor redactionLine(120, 0, 0);
     const QColor redactionFill(180, 0, 0, 150);
-    for (const PdfEditor::RedactionArea &area : std::as_const(m_redactionAreas)) {
-        if (area.page == page)
+    for (int i = 0; i < m_redactionAreas.size(); ++i) {
+        const PdfEditor::RedactionArea &area = m_redactionAreas.at(i);
+        if (area.page != page)
+            continue;
+        if (i == m_redactionHighlight)
+            drawDashedRegion(painter, pageToViewport(target, area.bounds),
+                             QColor(255, 140, 0), QColor(255, 140, 0, 130));
+        else
             drawDashedRegion(painter, pageToViewport(target, area.bounds),
                              redactionLine, redactionFill);
     }
@@ -1669,6 +1686,10 @@ void PageView::updateSelection()
         std::swap(a, b);
     }
 
+    // Extracting text is the expensive part. The end pages change as the mouse
+    // moves, so they are resolved now, along with pages near the viewport. Pages
+    // in between keep the same range, so earlier results are reused, and
+    // distant ones wait until they are painted or copied.
     constexpr int kNearPages = 1;
     const QPair<int, int> visible = visiblePageRange();
     const auto previousBegin = previous.cbegin();
@@ -1931,11 +1952,35 @@ void PageView::setSignatureToolActive(bool active)
 
 void PageView::clearRedactionAreas()
 {
+    m_redactionHighlight = -1;
     if (m_redactionAreas.isEmpty())
         return;
     m_redactionAreas.clear();
     viewport()->update();
     emit redactionAreasChanged(0);
+}
+
+// Removes one marked area (the Tools pane's list calls this).
+void PageView::removeRedactionArea(int index)
+{
+    if (index < 0 || index >= m_redactionAreas.size())
+        return;
+    m_redactionAreas.removeAt(index);
+    m_redactionHighlight = -1;
+    viewport()->update();
+    emit redactionAreasChanged(m_redactionAreas.size());
+}
+
+// Draws one marked area in orange, so the list entry that is selected can be
+// found on the page. -1 (or an index that does not exist) highlights none.
+void PageView::setHighlightedRedactionArea(int index)
+{
+    if (index < 0 || index >= m_redactionAreas.size())
+        index = -1;
+    if (m_redactionHighlight == index)
+        return;
+    m_redactionHighlight = index;
+    viewport()->update();
 }
 
 void PageView::setEraserActive(bool active)

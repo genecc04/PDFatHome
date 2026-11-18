@@ -9,14 +9,15 @@ license obligation.
 
 The versions below reflect the maintainer's development setup: Qt 6.8.0 for
 MSVC 2022 and MuPDF 1.26.10 and OpenSSL 3.6.5 from vcpkg using the
-`x64-windows-static-md` triplet. The vcpkg component versions were read from
-that local installation.
+`x64-windows-static-md` triplet. Tesseract and the libraries it brings in come from the
+same vcpkg installation (see the Tesseract section). The vcpkg component versions in the
+MuPDF table were read from that local installation.
 Other Qt installations, vcpkg baselines, features, or triplets can produce a
 different dependency set and must be checked separately.
 
-The source repository does not include Qt, MuPDF, or OpenSSL binaries. The
-application links to Qt dynamically and links MuPDF and OpenSSL statically when
-built with the configuration above. A public source repository and a
+The source repository does not include Qt, MuPDF, OpenSSL, or Tesseract binaries. The
+application links to Qt dynamically and links MuPDF, OpenSSL, and Tesseract statically
+when built with the configuration above. A public source repository and a
 distributed executable are different distribution cases; these notices alone
 do not satisfy all requirements for distributing a binary.
 
@@ -74,6 +75,48 @@ combined application, including any required corresponding source and build
 materials. The packaging script does not provide those materials. Obtain legal
 advice if you need a determination of how the license applies to this project.
 
+## Tesseract OCR and its dependencies
+
+Reconstruct mode uses [Tesseract](https://github.com/tesseract-ocr/tesseract) to
+recognize text on pages that have no text layer of their own (the code is in
+`modules/pdf-reconstruction`). Tesseract comes from vcpkg for the same
+`x64-windows-static-md` triplet and is linked statically into the executable, like
+MuPDF. Its Leptonica image library, and the image and archive libraries that
+Leptonica and Tesseract depend on, come with it.
+
+| Component | License | Notice file |
+|---|---|---|
+| Tesseract OCR | Apache License 2.0 | `licenses/vcpkg/tesseract-copyright.txt` |
+| Leptonica | Leptonica license (BSD 2-Clause style) | `licenses/vcpkg/leptonica-copyright.txt` |
+| giflib | MIT-style | `licenses/vcpkg/giflib-copyright.txt` |
+| libwebp | BSD 3-Clause | `licenses/vcpkg/libwebp-copyright.txt` |
+| libtiff | libtiff license (BSD-style) | `licenses/vcpkg/tiff-copyright.txt` |
+| libarchive | BSD 2-Clause | `licenses/vcpkg/libarchive-copyright.txt` |
+| curl | curl license (MIT-style) | `licenses/vcpkg/curl-copyright.txt` |
+
+The table follows the dependencies that the vcpkg `tesseract` port (Leptonica,
+libarchive, curl) and `leptonica` port (giflib, libjpeg-turbo, libpng, libwebp,
+OpenJPEG, libtiff, zlib) declare. libjpeg-turbo, libpng, OpenJPEG, and zlib are the
+ones already listed in the MuPDF table above. Installed versions are not recorded
+here: add them from `vcpkg list` when cutting a release, because the vcpkg checkout
+on the CI runner can differ from the maintainer's local installation. The set of
+dependencies can also change with the vcpkg baseline, so compare this table with the
+`licenses/vcpkg/` folder of the staged release (the release workflow copies the
+copyright file of every installed vcpkg package into it) before publishing.
+
+The notice files are the copyright files that vcpkg installs with each package; the
+release workflow collects them, so they match the exact build.
+
+### OCR language data
+
+`tessdata/eng.traineddata` is the English language model that Tesseract loads at run
+time. It is a data file, not code, and CMake copies the `tessdata` folder next to the
+executable when the folder exists (without it, OCR is unavailable and the app still
+builds). The Tesseract project publishes its trained data under the Apache License
+2.0. Confirm which repository and variant the shipped file comes from (`tessdata`,
+`tessdata_fast`, or `tessdata_best`) and its license for that exact file, and keep that
+license text with the release.
+
 ## Build and packaging tools
 
 The development workflow uses CMake, Visual Studio/MSVC, and vcpkg. The release
@@ -112,6 +155,10 @@ is not identified here as third-party material.
   the applicable obligations for the exact build, including any required
   corresponding source, build materials, and instructions. The packaging
   script does not generate or stage those materials.
+- The release workflow copies the copyright file of every installed vcpkg package, and
+  the `tessdata` folder when the repository has one, into the staged folder. Check the
+  staged `licenses/vcpkg/` folder against the tables above, and make sure the installer
+  script installs `tessdata/` and `licenses/` as well.
 - Release assets are `PDFhome-Setup-<version>.exe` (Inno Setup installer) and
   `PDFhome-windows.zip` (portable). Both must contain the same program files and
   the same `LICENSE`, `THIRD_PARTY_NOTICES.md`, and `licenses/` folder. The installer
@@ -121,6 +168,6 @@ is not identified here as third-party material.
   attach a source archive) and keep the build instructions in `README.md` accurate
   for that tag, so the corresponding source for the AGPL-licensed components
   (this project, MuPDF, jbig2dec) is available to recipients.
-- Recheck this file whenever Qt, vcpkg, MuPDF, OpenSSL, the triplet, or enabled
+- Recheck this file whenever Qt, vcpkg, MuPDF, OpenSSL, Tesseract, the triplet, or enabled
   features change. Do not rely on this development-build snapshot as a release
   SBOM.
