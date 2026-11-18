@@ -19,6 +19,7 @@
 #include <QThreadPool>
 #include <array>
 #include <functional>
+#include <memory>
 
 #include "PdfEditor.h"
 #include "DocumentSource.h"
@@ -31,6 +32,7 @@ class QPlainTextEdit;
 class QPushButton;
 class SearchResultModel;
 class QTimer;
+class ReconstructionOverlay;
 
 class PageView : public QAbstractScrollArea
 {
@@ -42,6 +44,9 @@ public:
         QString family = QStringLiteral("Helvetica");
         double sizePoints = 12.0;
         QColor color = QColor(0, 0, 0);
+        bool bold = false;
+        bool italic = false;
+        bool underline = false;
     };
 
     struct DrawStyle {
@@ -75,7 +80,6 @@ public:
     explicit PageView(QWidget *parent = nullptr);
     ~PageView() override;
 
-    // pageSizes, when its length matches the page count, saves asking the document for them.
     void setDocument(PdfEditor *document, bool preserveRasterPreviews = false,
                      const QVector<QSizeF> &pageSizes = {});
     void setLoading(bool loading);
@@ -119,6 +123,7 @@ public:
     void setFormFields(int page, const QVector<FormField> &fields);
     void clearFormFieldOverlays();
     bool hasPendingChanges() const;
+    ReconstructionOverlay *reconstruction() const { return m_reconstruction; }
     void setImageCropMode(bool active);
     void cancelImagePlacement();
 
@@ -200,6 +205,7 @@ protected:
 
 private:
     enum class ImageDrag { None, Move, Resize };
+    friend class ReconstructionOverlay;
 
     struct ErasePreviewStroke {
         Stroke stroke;
@@ -226,8 +232,6 @@ private:
         int page = -1;
         QList<QPolygonF> bounds;
         QString text;
-        // The range this part covers on its page. Parts far from the viewport
-        // are left unresolved until they are painted or copied.
         QPointF start;
         QPointF end;
         bool resolved = true;
@@ -352,6 +356,7 @@ private:
     bool m_interactionBlocked = false;
     int m_loadingFrame = 0;
     int m_searchIndex = -1;
+    ReconstructionOverlay *m_reconstruction = nullptr;
 
     ZoomMode m_zoomMode = ZoomMode::FitToWidth;
     double m_customZoom = 1.0;

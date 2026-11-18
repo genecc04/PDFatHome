@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "BookmarkPane.h"
 #include "PdfEditor.h"
+#include "ReconstructionOverlay.h"
 #include "SearchPane.h"
 #include "ThumbnailPane.h"
 
@@ -41,6 +42,7 @@ MainWindow::MainWindow(QWidget *parent)
     setupThumbnailPane();
     setupSearchPane();
     setupBookmarkPane();
+    setupReconstruction();
     setupMenus();
     setupToolbar();
     setupImageToolbar();
@@ -159,9 +161,25 @@ void MainWindow::updateActions()
     m_rotateRightAction->setEnabled(editable);
     m_deletePageAction->setEnabled(editable);
     m_thumbnails->setReorderEnabled(editable);
+    
+    ReconstructionOverlay *reconstruction = m_view->reconstruction();
+    const int pendingEdits = reconstruction->pendingCount();
+    if (m_reconstructAction) {
+        m_reconstructAction->setEnabled(editable);
+        const bool unavailable = !m_editor || m_viewOnly || m_documentLoadPending
+                                 || signedDocument;
+        if (unavailable && m_reconstructAction->isChecked())
+            m_reconstructAction->setChecked(false);
+    }
+    if (m_applyReconstructionAction)
+        m_applyReconstructionAction->setEnabled(
+            editable && (pendingEdits > 0 || reconstruction->isEditing()));
+    if (m_discardReconstructionAction)
+        m_discardReconstructionAction->setEnabled(editable && pendingEdits > 0);
 
-    m_undoAction->setEnabled(editable && (m_history.canUndo() || m_view->hasPendingStrokes()));
-    m_redoAction->setEnabled(editable && m_history.canRedo());
+    m_undoAction->setEnabled(editable && (m_history.canUndo() || m_view->hasPendingStrokes()
+                                          || pendingEdits > 0));
+    m_redoAction->setEnabled(editable && m_history.canRedo() && pendingEdits == 0);
     m_addImageAction->setEnabled(editable);
     m_cropImageAction->setEnabled(editable && m_view->hasPositionedImage());
     m_cancelImageAction->setEnabled(editable && m_view->hasActiveImagePlacement());

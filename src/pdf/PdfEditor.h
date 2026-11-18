@@ -97,14 +97,15 @@ public:
     PdfEditor &operator=(const PdfEditor &) = delete;
     bool addTextBox(int pageIndex, const QRectF &box, const QString &text,
                 const QString &fontName, double fontSize,
-                float red, float green, float blue);
+                float red, float green, float blue, bool underline = false);
     bool textAnnotationAt(int pageIndex, const QPointF &point,
                           int *annotationId, QRectF *bounds, QString *text,
-                          QString *fontName, double *fontSize, QColor *color);
+                          QString *fontName, double *fontSize, QColor *color,
+                          bool *underline = nullptr);
     bool updateTextAnnotation(int pageIndex, int annotationId,
                               const QString &oldText, const QString &newText,
                               const QString &fontName, double fontSize,
-                              float red, float green, float blue);
+                              float red, float green, float blue, bool underline = false);
     bool setTextAnnotationBounds(int pageIndex, int annotationId, const QString &text,
                                  const QRectF &bounds);
     bool deleteTextAnnotation(int pageIndex, int annotationId, const QString &text);
@@ -156,6 +157,33 @@ public:
     bool eraseInk(int pageIndex, const QVector<QPointF> &path, double radius,
                   int *annotationsRemoved = nullptr);
     bool addImageStamp(int pageIndex, const QRectF &box, const QByteArray &imageData);
+
+    struct TextSpan {
+        QString text;
+        QString font;
+        double sizePoints = 12.0;
+        QColor color = QColor(0, 0, 0);
+        bool underlined = false;
+        QPointF origin;
+        double width = 0.0;
+
+        QByteArray fontFile;
+        QString fontKey;
+    };
+
+    struct TextReplacement {
+        QRectF eraseArea;
+        QColor fillColor;
+        bool removeOriginalText = false;
+        QVector<TextSpan> spans;
+    };
+
+    bool replaceTexts(int pageIndex, const QVector<TextReplacement> &items,
+                      int *unsupportedCharacters = nullptr);
+
+    bool replaceText(int pageIndex, const QRectF &eraseArea, const QColor &fillColor,
+                     bool removeOriginalText, const QVector<TextSpan> &spans,
+                     int *unsupportedCharacters = nullptr);
     bool formFieldsOnPage(int pageIndex, QVector<FormField> *fields);
     bool formFieldAt(int pageIndex, const QPointF &point, FormField *field);
     bool setFormFieldValue(int pageIndex, int widgetIndex, const QString &value,

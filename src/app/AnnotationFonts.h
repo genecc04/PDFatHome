@@ -3,19 +3,20 @@
 #include <QString>
 #include <QStringList>
 
-// The fonts the text tool offers, as the family shown in the UI and the PDF
-// base-14 font name stored in the annotation.
 namespace AnnotationFonts {
 
 struct Entry {
     const char *family;
-    const char *pdfName;
+    const char *regular;
+    const char *bold;
+    const char *italic;
+    const char *boldItalic;
 };
 
 inline constexpr Entry kEntries[] = {
-    { "Helvetica", "Helv" },
-    { "Times", "TiRo" },
-    { "Courier", "Cour" },
+    { "Helvetica", "Helv", "HeBo", "HeOb", "HeBO" },
+    { "Times",     "TiRo", "TiBo", "TiIt", "TiBI" },
+    { "Courier",   "Cour", "CoBo", "CoOb", "CoBO" },
 };
 
 inline QStringList families()
@@ -26,23 +27,52 @@ inline QStringList families()
     return result;
 }
 
-// Unknown input falls back to the first entry (Helvetica).
-inline QString pdfName(const QString &family)
+inline QString pdfName(const QString &family, bool bold = false, bool italic = false)
 {
+    const Entry *chosen = &kEntries[0];
     for (const Entry &entry : kEntries) {
-        if (family.compare(QLatin1String(entry.family), Qt::CaseInsensitive) == 0)
-            return QString::fromLatin1(entry.pdfName);
+        if (family.compare(QLatin1String(entry.family), Qt::CaseInsensitive) == 0) {
+            chosen = &entry;
+            break;
+        }
     }
-    return QString::fromLatin1(kEntries[0].pdfName);
+
+    const char *name = bold ? (italic ? chosen->boldItalic : chosen->bold)
+                            : (italic ? chosen->italic : chosen->regular);
+    return QString::fromLatin1(name);
 }
 
-inline QString family(const QString &pdfName)
+inline QString family(const QString &name)
 {
     for (const Entry &entry : kEntries) {
-        if (pdfName == QLatin1String(entry.pdfName))
+        if (name == QLatin1String(entry.regular) || name == QLatin1String(entry.bold)
+            || name == QLatin1String(entry.italic) || name == QLatin1String(entry.boldItalic))
             return QString::fromLatin1(entry.family);
     }
+    if (name.startsWith(QLatin1String("Times"), Qt::CaseInsensitive))
+        return QString::fromLatin1(kEntries[1].family);
+    if (name.startsWith(QLatin1String("Cour"), Qt::CaseInsensitive))
+        return QString::fromLatin1(kEntries[2].family);
     return QString::fromLatin1(kEntries[0].family);
+}
+
+inline bool isBold(const QString &name)
+{
+    for (const Entry &entry : kEntries) {
+        if (name == QLatin1String(entry.bold) || name == QLatin1String(entry.boldItalic))
+            return true;
+    }
+    return name.contains(QLatin1String("Bold"), Qt::CaseInsensitive);
+}
+
+inline bool isItalic(const QString &name)
+{
+    for (const Entry &entry : kEntries) {
+        if (name == QLatin1String(entry.italic) || name == QLatin1String(entry.boldItalic))
+            return true;
+    }
+    return name.contains(QLatin1String("Italic"), Qt::CaseInsensitive)
+        || name.contains(QLatin1String("Oblique"), Qt::CaseInsensitive);
 }
 
 }

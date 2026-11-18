@@ -20,12 +20,15 @@ class QDockWidget;
 class QDragEnterEvent;
 class QDropEvent;
 class QLabel;
+class QComboBox;
 class QMenu;
 class QSpinBox;
 class QToolButton;
 class BookmarkPane;
+class ColorMenuButton;
 class SearchPane;
 class ThumbnailPane;
+class ReconstructionController;
 
 class MainWindow : public QMainWindow
 {
@@ -59,6 +62,11 @@ private:
     void setupThumbnailPane();
     void setupSearchPane();
     void setupBookmarkPane();
+    void setupReconstruction();
+    void requestReconstruction();
+    void updateReconstructionSource(const DocumentSource &source);
+    void applyReconstruction();
+    void discardReconstruction();
     void setupMenus();
     void setupToolbar();
     void setupImageToolbar();
@@ -199,6 +207,18 @@ private:
     QString m_newPassword;
     QAction *m_setPasswordAction = nullptr;
     QAction *m_removePasswordAction = nullptr;
+    QAction *m_reconstructAction = nullptr;
+    QAction *m_applyReconstructionAction = nullptr;
+    QAction *m_discardReconstructionAction = nullptr;
+
+    QComboBox *m_fontBox = nullptr;
+    QSpinBox *m_fontSizeBox = nullptr;
+    ColorMenuButton *m_textColorButton = nullptr;
+    QAction *m_boldAction = nullptr;
+    QAction *m_italicAction = nullptr;
+    QAction *m_underlineAction = nullptr;
+    PageView::TextStyle m_textBoxStyle;
+    ReconstructionController *m_reconstruction = nullptr;
 
     std::unique_ptr<PdfEditor> m_editor;
     std::atomic_bool m_closing{false};

@@ -3,6 +3,7 @@
 #include "ColorMenuButton.h"
 #include "PageRangeDialog.h"
 #include "PdfEditor.h"
+#include "ReconstructionOverlay.h"
 #include "ThumbnailPane.h"
 
 #include <QAction>
@@ -433,7 +434,7 @@ namespace {
     }
     QString annotationFontName(const PageView::TextStyle &style)
     {
-        return AnnotationFonts::pdfName(style.family);
+        return AnnotationFonts::pdfName(style.family, style.bold, style.italic);
     }
 }
 
@@ -743,7 +744,8 @@ void MainWindow::placeText(int page, const QRectF &box, const QString &text,
 
     if (!m_editor->addTextBox(page, box, text, annotationFontName(style),
                               style.sizePoints, style.color.redF(),
-                              style.color.greenF(), style.color.blueF())) {
+                              style.color.greenF(), style.color.blueF(),
+                              style.underline)) {
         QMessageBox::warning(this, "Add text failed", m_editor->lastError());
         reopenEditor(m_history.current());
         updateActions();
@@ -771,7 +773,7 @@ void MainWindow::updateTextAnnotation(int page, int annotationId,
     if (!m_editor->updateTextAnnotation(page, annotationId, oldText, newText,
                                         annotationFontName(style), style.sizePoints,
                                         style.color.redF(), style.color.greenF(),
-                                        style.color.blueF())) {
+                                        style.color.blueF(), style.underline)) {
         QMessageBox::warning(this, "Edit added text", m_editor->lastError());
         reopenEditor(m_history.current());
         updateActions();
@@ -1208,8 +1210,6 @@ bool MainWindow::commitFormField(int page, int widgetIndex, const QString &value
         updateActions();
         return false;
     }
-    // Fields shared across widgets may change other pages, so those take the
-    // full reload.
     if (pageLocal)
         return refreshAfterPageEdit({ page }, page);
     return refreshAfterEdit(page, {}, m_view->pageSizes());
@@ -1272,6 +1272,8 @@ void MainWindow::undo()
     if (m_documentLoadPending || m_documentOperationPending)
         return;
     if (m_view->undoLastStroke())
+        return;
+    if (m_view->reconstruction()->undoLastPending())
         return;
     stepHistory(m_history.peekUndo(), true);
 }

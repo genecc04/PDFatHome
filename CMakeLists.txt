@@ -10,6 +10,9 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 find_package(unofficial-libmupdf CONFIG REQUIRED)
 find_package(OpenSSL REQUIRED COMPONENTS Crypto)
 
+# Text reconstruction (text layer + OCR); finds Tesseract itself.
+add_subdirectory(modules/pdf-reconstruction)
+
 add_executable(PdfApp WIN32
     src/app/AnnotationFonts.h
     src/app/main.cpp
@@ -17,16 +20,20 @@ add_executable(PdfApp WIN32
     src/app/MainWindow.h
     src/app/MainWindowDocument.cpp
     src/app/MainWindowEditing.cpp
+    src/app/MainWindowReconstruction.cpp
     src/app/MainWindowUi.cpp
     src/core/DocumentSource.h
     src/core/EditHistory.cpp
     src/core/EditHistory.h
     src/core/Geometry.h
+    src/pdf/MuPdfPageProvider.cpp
+    src/pdf/MuPdfPageProvider.h
     src/pdf/MuPdfRenderCache.cpp
     src/pdf/MuPdfRenderCache.h
     src/pdf/PdfEditor.cpp
     src/pdf/PdfEditor.h
     src/pdf/PdfSigning.cpp
+    src/pdf/PdfTextReplace.cpp
     src/pdf/RenderDocumentBytesCache.h
     src/ui/BookmarkPane.cpp
     src/ui/BookmarkPane.h
@@ -37,6 +44,10 @@ add_executable(PdfApp WIN32
     src/ui/PageView.cpp
     src/ui/PageView.h
     src/ui/RasterStore.h
+    src/ui/ReconstructionController.cpp
+    src/ui/ReconstructionController.h
+    src/ui/ReconstructionOverlay.cpp
+    src/ui/ReconstructionOverlay.h
     src/ui/SearchPane.cpp
     src/ui/SearchPane.h
     src/ui/SearchResultModel.cpp
@@ -47,6 +58,8 @@ add_executable(PdfApp WIN32
     src/ui/ThumbnailPane.h
     resources/app_resources.qrc
     resources/pdfappicon.rc
+    src/pdf/SystemFonts.h
+    src/pdf/SystemFonts.cpp
 )
 
 target_include_directories(PdfApp PRIVATE
@@ -63,4 +76,15 @@ target_link_libraries(PdfApp PRIVATE
     Qt6::Widgets
     unofficial::libmupdf::libmupdf
     OpenSSL::Crypto
+    PdfReconstruction
 )
+
+if(EXISTS "${CMAKE_SOURCE_DIR}/tessdata")
+    add_custom_command(TARGET PdfApp POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/tessdata"
+            "$<TARGET_FILE_DIR:PdfApp>/tessdata"
+    )
+else()
+    message(WARNING "tessdata/ not found: OCR of scanned pages will be unavailable.")
+endif()

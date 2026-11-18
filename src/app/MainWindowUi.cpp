@@ -3,11 +3,13 @@
 #include "BookmarkPane.h"
 #include "ColorMenuButton.h"
 #include "PdfEditor.h"
+#include "ReconstructionOverlay.h"
 #include "SearchPane.h"
 #include "ThumbnailPane.h"
 
 #include <QAction>
 #include <QActionGroup>
+#include <QAbstractItemView>
 #include <QAbstractSpinBox>
 #include <QApplication>
 #include <QColor>
@@ -20,6 +22,10 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QFont>
+#include <QFontComboBox>
+#include <QPainter>
+#include <QPixmap>
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QSpinBox>
@@ -34,6 +40,27 @@ namespace
 {
 constexpr int kToolbarIconSize = 32;
 constexpr int kNumericControlWidth = 88;
+
+QIcon styleIcon(const QString &letter, bool bold, bool italic, bool underline)
+{
+    const qreal dpr = qApp->devicePixelRatio();
+    QPixmap pixmap(QSize(kToolbarIconSize, kToolbarIconSize) * dpr);
+    pixmap.setDevicePixelRatio(dpr);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::TextAntialiasing);
+    QFont font = painter.font();
+    font.setPixelSize(int(kToolbarIconSize * 0.62));
+    font.setBold(bold);
+    font.setItalic(italic);
+    font.setUnderline(underline);
+    painter.setFont(font);
+    painter.setPen(qApp->palette().color(QPalette::ButtonText));
+    painter.drawText(QRect(0, 0, kToolbarIconSize, kToolbarIconSize), Qt::AlignCenter, letter);
+    painter.end();
+    return QIcon(pixmap);
+}
 
 QToolBar *makeToolbar(QMainWindow *window, const QString &title,
                       const QString &objectName,
@@ -158,12 +185,16 @@ void MainWindow::setupViewer()
             QString fontName;
             double fontSize = 12.0;
             QColor color;
+            bool underline = false;
             if (!m_editor || m_viewOnly
                 || !m_editor->textAnnotationAt(page, point, annotationId, bounds, text,
-                                               &fontName, &fontSize, &color))
+                                               &fontName, &fontSize, &color, &underline))
                 return false;
 
             style->family = AnnotationFonts::family(fontName);
+            style->bold = AnnotationFonts::isBold(fontName);
+            style->italic = AnnotationFonts::isItalic(fontName);
+            style->underline = underline;
             style->sizePoints = fontSize;
             style->color = color;
             return true;
@@ -443,6 +474,10 @@ void MainWindow::setupMenus()
     toolGroup->addAction(m_drawAction);
     toolGroup->addAction(m_redactAction);
     toolGroup->addAction(m_signAction);
+    toolGroup->addAction(m_reconstructAction);
+    editMenu->addAction(m_reconstructAction);
+    editMenu->addAction(m_applyReconstructionAction);
+    editMenu->addAction(m_discardReconstructionAction);
 
     m_addImageAction = editMenu->addAction("Add &image...");
     m_addImageAction->setShortcut(Qt::CTRL | Qt::Key_I);
@@ -595,50 +630,165 @@ void MainWindow::setupTextToolbar()
             m_view, &PageView::deleteSelectedTextAnnotation);
     toolbar->addSeparator();
 
-    auto *fontBox = new QComboBox(this);
-    fontBox->addItems(AnnotationFonts::families());
-    fontBox->setCurrentText(AnnotationFonts::families().first());
-    fontBox->setMinimumWidth(130);
-    fontBox->setFocusPolicy(Qt::NoFocus);
-    fontBox->setProperty("textEditorStyleControl", true);
-    toolbar->addWidget(fontBox);
+    m_fontBox = new QComboBox(this);
+    m_fontBox->addItems(AnnotationFonts::families());
+    m_fontBox->setCurrentText(AnnotationFonts::families().first());
+    m_fontBox->setMinimumWidth(130);
+    m_fontBox->setFocusPolicy(Qt::NoFocus);
+    m_fontBox->setProperty("textEditorStyleControl", true);
+    m_fontBox->setToolTip("Font");
+    QAction *fontBoxAction = toolbar->addWidget(m_fontBox);
 
-    auto *size = new QSpinBox(this);
-    size->setRange(6, 200);
-    size->setValue(12);
-    size->setSuffix(" pt");
-    size->setMinimumWidth(kNumericControlWidth);
-    size->setCorrectionMode(QAbstractSpinBox::CorrectToNearestValue);
-    size->setKeyboardTracking(false);
-    size->setProperty("textEditorStyleControl", true);
-    toolbar->addWidget(size);
+    auto *reconFontBox = new QFontComboBox(this);
+    reconFontBox->setEditable(false);
+    reconFontBox->setFontFilters(QFontComboBox::ScalableFonts);
+    reconFontBox->setFixedWidth(130);
+    reconFontBox->view()->setMinimumWidth(260);
+    reconFontBox->setFocusPolicy(Qt::NoFocus);
+    reconFontBox->setProperty("textEditorStyleControl", true);
+    reconFontBox->setToolTip("Font of the selected text");
+    QAction *reconFontAction = toolbar->addWidget(reconFontBox);
+    reconFontAction->setVisible(false);
 
-    auto *colorButton = new ColorMenuButton(QColor(0, 0, 0), this);
-    colorButton->setProperty("textEditorStyleControl", true);
-    toolbar->addWidget(colorButton);
-    connect(m_view, &PageView::textAnnotationEditingStyleChanged, this,
-            [fontBox, size, colorButton](const PageView::TextStyle &style) {
-        const QSignalBlocker fontBlocker(fontBox);
-        const QSignalBlocker sizeBlocker(size);
-        const QSignalBlocker colorBlocker(colorButton);
-        fontBox->setCurrentText(style.family);
-        size->setValue(qRound(style.sizePoints));
-        colorButton->setColor(style.color);
-    });
+    m_fontSizeBox = new QSpinBox(this);
+    m_fontSizeBox->setRange(6, 200);
+    m_fontSizeBox->setValue(12);
+    m_fontSizeBox->setSuffix(" pt");
+    m_fontSizeBox->setMinimumWidth(kNumericControlWidth);
+    m_fontSizeBox->setCorrectionMode(QAbstractSpinBox::CorrectToNearestValue);
+    m_fontSizeBox->setKeyboardTracking(false);
+    m_fontSizeBox->setProperty("textEditorStyleControl", true);
+    m_fontSizeBox->setToolTip("Font size");
+    toolbar->addWidget(m_fontSizeBox);
 
-    auto applyStyle = [this, fontBox, size, colorButton]() {
-        PageView::TextStyle style;
-        style.family = fontBox->currentText();
-        style.sizePoints = size->value();
-        style.color = colorButton->color();
-        m_view->setTextStyle(style);
-    };
-    connect(fontBox, &QComboBox::currentTextChanged, this, applyStyle);
-    connect(size, &QSpinBox::valueChanged, this, applyStyle);
-    connect(colorButton, &ColorMenuButton::colorChanged, this, applyStyle);
+    m_textColorButton = new ColorMenuButton(QColor(0, 0, 0), this);
+    m_textColorButton->setProperty("textEditorStyleControl", true);
+    toolbar->addWidget(m_textColorButton);
+
+    m_boldAction = toolbar->addAction(styleIcon("B", true, false, false), "Bold");
+    m_italicAction = toolbar->addAction(styleIcon("I", false, true, false), "Italic");
+    m_underlineAction = toolbar->addAction(styleIcon("U", false, false, true), "Underline");
+    m_boldAction->setToolTip("Bold (Ctrl+B while editing text)");
+    m_italicAction->setToolTip("Italic (Ctrl+I while editing text)");
+    m_underlineAction->setToolTip(
+        "Underline (Ctrl+U while editing text)");
+    for (QAction *action : { m_boldAction, m_italicAction, m_underlineAction }) {
+        action->setCheckable(true);
+        if (QWidget *button = toolbar->widgetForAction(action))
+            button->setProperty("textEditorStyleControl", true);
+    }
 
     toolbar->addSeparator();
-    applyStyle();
+    toolbar->addAction(m_applyReconstructionAction);
+
+    ReconstructionOverlay *overlay = m_view->reconstruction();
+
+    auto applyTextBoxStyle = [this]() {
+        m_textBoxStyle.family = m_fontBox->currentText();
+        m_textBoxStyle.sizePoints = m_fontSizeBox->value();
+        m_textBoxStyle.color = m_textColorButton->color();
+        m_textBoxStyle.bold = m_boldAction->isChecked();
+        m_textBoxStyle.italic = m_italicAction->isChecked();
+        m_textBoxStyle.underline = m_underlineAction->isChecked();
+        m_view->setTextStyle(m_textBoxStyle);
+    };
+
+    auto showTextBoxStyle = [this]() {
+        const QSignalBlocker fontBlocker(m_fontBox);
+        const QSignalBlocker sizeBlocker(m_fontSizeBox);
+        const QSignalBlocker colorBlocker(m_textColorButton);
+        const QSignalBlocker boldBlocker(m_boldAction);
+        const QSignalBlocker italicBlocker(m_italicAction);
+        const QSignalBlocker underlineBlocker(m_underlineAction);
+        m_fontBox->setCurrentText(m_textBoxStyle.family);
+        m_fontSizeBox->setValue(qRound(m_textBoxStyle.sizePoints));
+        m_textColorButton->setColor(m_textBoxStyle.color);
+        m_boldAction->setChecked(m_textBoxStyle.bold);
+        m_italicAction->setChecked(m_textBoxStyle.italic);
+        m_underlineAction->setChecked(m_textBoxStyle.underline);
+    };
+
+    connect(m_fontBox, &QComboBox::currentTextChanged, this,
+            [applyTextBoxStyle](const QString &) { applyTextBoxStyle(); });
+
+    connect(reconFontBox, &QComboBox::textActivated, this,
+            [overlay](const QString &family) {
+        if (overlay->isEditing())
+            overlay->setFontName(family);
+    });
+    connect(m_fontSizeBox, &QSpinBox::valueChanged, this,
+            [overlay, applyTextBoxStyle](int points) {
+        if (overlay->isEditing())
+            overlay->setFontSize(points);
+        else
+            applyTextBoxStyle();
+    });
+    connect(m_textColorButton, &ColorMenuButton::colorChanged, this,
+            [overlay, applyTextBoxStyle](const QColor &color) {
+        if (overlay->isEditing())
+            overlay->setTextColor(color);
+        else
+            applyTextBoxStyle();
+    });
+    connect(m_boldAction, &QAction::toggled, this, [overlay, applyTextBoxStyle](bool on) {
+        if (overlay->isEditing())
+            overlay->setBold(on);
+        else
+            applyTextBoxStyle();
+    });
+    connect(m_italicAction, &QAction::toggled, this, [overlay, applyTextBoxStyle](bool on) {
+        if (overlay->isEditing())
+            overlay->setItalic(on);
+        else
+            applyTextBoxStyle();
+    });
+    connect(m_underlineAction, &QAction::toggled, this, [overlay, applyTextBoxStyle](bool on) {
+        if (overlay->isEditing())
+            overlay->setUnderlined(on);
+        else
+            applyTextBoxStyle();
+    });
+
+    connect(overlay, &ReconstructionOverlay::formatChanged, this,
+            [this, reconFontBox](const ReconstructionFormat &format) {
+        const QSignalBlocker sizeBlocker(m_fontSizeBox);
+        const QSignalBlocker colorBlocker(m_textColorButton);
+        const QSignalBlocker boldBlocker(m_boldAction);
+        const QSignalBlocker italicBlocker(m_italicAction);
+        const QSignalBlocker underlineBlocker(m_underlineAction);
+        if (!format.fontFamily.isEmpty())
+            reconFontBox->setCurrentFont(QFont(format.fontFamily));
+        m_fontSizeBox->setValue(qRound(format.sizePoints));
+        m_textColorButton->setColor(format.color);
+        m_boldAction->setChecked(format.bold);
+        m_italicAction->setChecked(format.italic);
+        m_underlineAction->setChecked(format.underlined);
+    });
+    connect(overlay, &ReconstructionOverlay::editingChanged, this,
+            [showTextBoxStyle, fontBoxAction, reconFontAction](bool editing) {
+        fontBoxAction->setVisible(!editing);
+        reconFontAction->setVisible(editing);
+        if (!editing)
+            showTextBoxStyle();
+    });
+
+    connect(m_view, &PageView::textAnnotationEditingStyleChanged, this,
+            [this](const PageView::TextStyle &style) {
+        const QSignalBlocker fontBlocker(m_fontBox);
+        const QSignalBlocker sizeBlocker(m_fontSizeBox);
+        const QSignalBlocker colorBlocker(m_textColorButton);
+        const QSignalBlocker boldBlocker(m_boldAction);
+        const QSignalBlocker italicBlocker(m_italicAction);
+        const QSignalBlocker underlineBlocker(m_underlineAction);
+        m_fontBox->setCurrentText(style.family);
+        m_fontSizeBox->setValue(qRound(style.sizePoints));
+        m_textColorButton->setColor(style.color);
+        m_boldAction->setChecked(style.bold);
+        m_italicAction->setChecked(style.italic);
+        m_underlineAction->setChecked(style.underline);
+    });
+
+    applyTextBoxStyle();
 }
 
 void MainWindow::setupDrawToolbar()

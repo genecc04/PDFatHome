@@ -417,6 +417,7 @@ bool MainWindow::showFile(const QString &path, int page, bool reportErrors,
     removeDeferredSnapshots();
     m_view->setRenderSource({ path, m_password });
     m_thumbnails->setRenderSource({ path, m_password });
+    updateReconstructionSource({ path, m_password });
 
     {
         QSignalBlocker blocker(m_pageBox);
@@ -1065,6 +1066,7 @@ bool MainWindow::refreshAfterPageEdit(const QList<int> &changedPages, int page)
     m_view->invalidatePageRenders(pages);
     m_view->setRenderSource({ newPath, m_password });
     m_thumbnails->setRenderSource({ newPath, m_password });
+    updateReconstructionSource({ newPath, m_password });
     m_thumbnails->invalidatePageRenders(pages);
 
     if (m_view->pageSizes().size() == m_document->pageCount())

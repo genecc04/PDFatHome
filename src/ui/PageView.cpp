@@ -2,6 +2,7 @@
 #include "Geometry.h"
 #include "MuPdfRenderCache.h"
 #include "SearchResultModel.h"
+#include "ReconstructionOverlay.h"
 
 #include <QAbstractItemModel>
 #include <QApplication>
@@ -102,6 +103,7 @@ PageView::PageView(QWidget *parent)
     , m_sharedRasterBudgetKilobytes(kSharedPageRasterCacheKilobytes)
 {
     m_renderPool.setMaxThreadCount(1);
+    m_reconstruction = new ReconstructionOverlay(this);
     setFocusPolicy(Qt::StrongFocus);
     setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
     horizontalScrollBar()->setSingleStep(30);
@@ -187,6 +189,7 @@ void PageView::setLoading(bool loading)
     if (loading) {
         finishEditor(false);
         finishFormEditor(false);
+        m_reconstruction->cancelEdit();
         m_autoScroll->stop();
         m_selecting = false;
         m_redactionDrawing = false;
@@ -303,6 +306,7 @@ void PageView::onDocumentChanged(bool preserveRasterPreviews, const QVector<QSiz
     invalidatePendingPageRenders();
     m_zoomTimer->stop();
     m_pendingZoomFactor = zoomFactor();
+    m_reconstruction->reset();
     finishEditor(false);
     finishFormEditor(false);
     finishImage(false);
@@ -551,6 +555,7 @@ void PageView::recalculateLayout(bool keepPosition)
     applyEditorStyle();
     positionEditor();
     positionFormEditor();
+    m_reconstruction->reposition();
     positionEmptyStateButton();
     viewport()->update();
     updateCurrentPage();
@@ -695,7 +700,6 @@ void PageView::discardQueuedPageRenders()
 
 std::array<RasterStore *, 3> PageView::rasterStores()
 {
-    // Base, page, tile: the order the shared budget breaks eviction ties in.
     return { &m_baseStore, &m_pageStore, &m_tileStore };
 }
 
@@ -736,8 +740,6 @@ void PageView::enforcePageRasterBudget()
 
     int evicted = 0;
     if (rasterCostKilobytes() > m_sharedRasterBudgetKilobytes) {
-        // Gather the cached rasters once, then evict from the farthest page
-        // inward, one page at a time.
         struct Entry {
             int page;
             int distance;
@@ -775,8 +777,6 @@ void PageView::enforcePageRasterBudget()
     }
 }
 
-// A tiled page needs every visible tile cached at once. With a smaller cache
-// the tiles evict each other and parts of the page stay blank or out of date.
 void PageView::reserveTileCache(int visibleTiles)
 {
     constexpr int tileKilobytes = kPageTileSize * kPageTileSize * 4 / 1024;
@@ -1063,8 +1063,6 @@ QPixmap PageView::pageTile(int page, const QSize &fullSize, int tileX, int tileY
     return cached ? *cached : QPixmap();
 }
 
-// Returns the cached raster for key (possibly stale), and starts a background
-// render when it is missing or stale and no failure or render is outstanding.
 const QPixmap *PageView::rasterFor(RasterStore &store, const RasterKey &key,
                                    const QSize &renderSize, const QRectF &pageRegion,
                                    qreal dpr)
@@ -1282,8 +1280,6 @@ void PageView::appendErasedInk(QPainterPath &erasedInk, const QVector<Stroke> &s
     }
 }
 
-// The page itself: white backing, the rendered page (or its tiles), and the
-// eraser preview that shows the page without the ink being erased.
 void PageView::drawPageRaster(QPainter &painter, int page, const QRect &target,
                               const QRect &exposed, qreal dpr)
 {
@@ -1353,7 +1349,6 @@ void PageView::drawSelectionHighlight(QPainter &painter, int page, const QRect &
     }
 }
 
-// Shows a text box at its new bounds while the page raster still has it at the old ones.
 void PageView::drawTextAnnotationPreview(QPainter &painter, int page, const QRect &target,
                                          qreal dpr, const QRectF &oldBounds,
                                          const QRectF &newBounds, const QString &text,
@@ -1372,6 +1367,9 @@ void PageView::drawTextAnnotationPreview(QPainter &painter, int page, const QRec
 
     QFont font(style.family);
     font.setPixelSize(qMax(1, qRound(style.sizePoints * m_scale)));
+    font.setBold(style.bold);
+    font.setItalic(style.italic);
+    font.setUnderline(style.underline);
     painter.save();
     painter.setFont(font);
     painter.setPen(style.color);
@@ -1400,13 +1398,13 @@ void PageView::drawImageStampPreview(QPainter &painter, int page, const QRect &t
     }
 }
 
-// Everything drawn over a page: selections, in-progress edits, ink and tool previews.
 void PageView::drawPageOverlays(QPainter &painter, int page, const QRect &target, qreal dpr)
 {
     painter.save();
     painter.setClipRect(target, Qt::IntersectClip);
 
     drawSelectionHighlight(painter, page, target);
+    m_reconstruction->paint(painter, page, target);
 
     if ((m_movingTextAnnotation || m_resizingTextAnnotation)
         && m_selectedTextAnnotationPage == page) {
@@ -1549,6 +1547,7 @@ void PageView::scrollContentsBy(int dx, int dy)
     QAbstractScrollArea::scrollContentsBy(dx, dy);
     positionEditor();
     positionFormEditor();
+    m_reconstruction->reposition();
     if (!m_jumping)
         updateCurrentPage();
 }
@@ -1632,6 +1631,7 @@ void PageView::keyPressEvent(QKeyEvent *event)
 
 void PageView::commitPendingEdits()
 {
+    m_reconstruction->flush();
     finishEditor(true);
     finishFormEditor(true);
     commitStrokes();
@@ -1669,10 +1669,6 @@ void PageView::updateSelection()
         std::swap(a, b);
     }
 
-    // Extracting text is the expensive part. The end pages change as the mouse
-    // moves, so they are resolved now, along with pages near the viewport. Pages
-    // in between keep the same range, so earlier results are reused, and
-    // distant ones wait until they are painted or copied.
     constexpr int kNearPages = 1;
     const QPair<int, int> visible = visiblePageRange();
     const auto previousBegin = previous.cbegin();
@@ -2305,7 +2301,10 @@ void PageView::setTextStyle(const TextStyle &style)
         if (m_editingTextAnnotation
             && (m_editorStyle.family != style.family
                 || !qFuzzyCompare(m_editorStyle.sizePoints, style.sizePoints)
-                || m_editorStyle.color != style.color))
+                || m_editorStyle.color != style.color
+                || m_editorStyle.bold != style.bold
+                || m_editorStyle.italic != style.italic
+                || m_editorStyle.underline != style.underline))
             m_editingTextAnnotationStyleChanged = true;
         m_editorStyle = style;
         applyEditorStyle();
@@ -2540,6 +2539,8 @@ void PageView::clearFormFieldOverlays()
 
 bool PageView::hasPendingChanges() const
 {
+    if (m_reconstruction->hasPendingEdit())
+        return true;
     if (!m_strokes.isEmpty() || m_drawing || m_erasing || m_imageActive)
         return true;
     if (m_editor) {
@@ -2561,6 +2562,9 @@ void PageView::mousePressEvent(QMouseEvent *event)
     }
 
     const QPoint pos = event->position().toPoint();
+
+    if (m_reconstruction->handleMousePress(event))
+        return;
 
     if (m_formEditor)
         finishFormEditor(true);
@@ -2895,6 +2899,10 @@ void PageView::mouseMoveEvent(QMouseEvent *event)
         return;
 
     const QPoint pos = event->position().toPoint();
+
+    if (m_reconstruction->handleMouseMove(pos))
+        return;
+
     if (m_redactionTool) {
         if (m_redactionDrawing && m_redactionPage >= 0
             && m_redactionPage < m_pageSizes.size()) {
@@ -3418,9 +3426,13 @@ void PageView::applyEditorStyle()
 
     m_editor->setStyleSheet(
         QStringLiteral("QPlainTextEdit { color: %1; background: %2; border: 2px solid #0066cc;"
-                       " font-family: \"%3\"; font-size: %4px; }")
+                       " font-family: \"%3\"; font-size: %4px;"
+                       " font-weight: %5; font-style: %6; text-decoration: %7; }")
             .arg(m_editorStyle.color.name(), background, m_editorStyle.family)
-            .arg(qMax(4, int(m_editorStyle.sizePoints * m_scale))));
+            .arg(qMax(4, int(m_editorStyle.sizePoints * m_scale)))
+            .arg(m_editorStyle.bold ? QStringLiteral("bold") : QStringLiteral("normal"),
+                 m_editorStyle.italic ? QStringLiteral("italic") : QStringLiteral("normal"))
+            .arg(m_editorStyle.underline ? QStringLiteral("underline") : QStringLiteral("none")));
 }
 
 void PageView::positionEditor()
