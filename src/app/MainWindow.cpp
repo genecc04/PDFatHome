@@ -45,7 +45,7 @@ MainWindow::MainWindow(QWidget *parent)
     setupReconstruction();
     setupMenus();
     setupToolbar();
-    setupImageToolbar();
+    setupImageActions();
     setupToolsToolbar();
     setupToolsPane();
     updateActions();

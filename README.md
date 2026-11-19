@@ -24,16 +24,16 @@ web links embedded in a PDF in your default browser after you confirm.
 - Reconstruct mode outlines the text on the current page, using the page's own text or
   OCR (Tesseract) on scanned pages; click a region to change its wording, font, size,
   color, or position
-- Edits wait as a preview until you choose Apply reconstruction, which writes them into
-  the PDF as real, selectable text and leaves the mode; Undo steps back through the
-  waiting edits
+- Edits wait as a preview until you choose Apply reconstruction (or save), which writes
+  them into the PDF as real, selectable text and leaves the mode; Undo steps back
+  through the waiting edits
 
 **Marking up and filling out**
 - Fill PDF forms; add and edit text, highlights, drawings, and images
 - Create visual E-signatures by typing, drawing, or uploading; save and manage them locally
 - Move, resize, crop, or delete added images and signatures
-- Tool options (font and size, pen and highlighter settings, the list of marked
-  redaction areas) are in the Tools pane on the right
+- Tool options (font and size, pen and highlighter settings, image crop and delete,
+  the list of marked redaction areas) are in the Tools pane on the right
 
 **Security**
 - Set or remove AES-256 passwords; digitally sign with an RSA certificate

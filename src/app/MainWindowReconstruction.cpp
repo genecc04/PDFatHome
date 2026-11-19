@@ -18,6 +18,21 @@
 
 #include <utility>
 
+// "Reconstruct" mode. Three objects cooperate, and this file is the glue:
+//
+//   ReconstructionController  works out a page's paragraphs on a background
+//                             thread (text layer first, OCR if there is none)
+//   ReconstructionOverlay     lives inside PageView: outlines paragraphs,
+//                             highlights the hovered one, opens the editor box,
+//                             and keeps finished edits as "pending" (drawn as a
+//                             preview) instead of writing them
+//   MainWindow (this file)    switches the overlay on/off, hands it each result,
+//                             and writes ALL pending edits into the PDF at once
+//
+// Edits are written when the user chooses Apply reconstruction (which also leaves
+// the mode), leaves the mode,
+// saves, or does anything else that changes the document (those all go through
+// PageView::commitPendingEdits -> ReconstructionOverlay::flush -> applyRequested).
 
 void MainWindow::setupReconstruction()
 {
@@ -38,13 +53,21 @@ void MainWindow::setupReconstruction()
         "Write every text edit made in reconstruct mode into the PDF at once, then leave "
         "reconstruct mode. Leaving reconstruct mode and saving write the edits too.");
 
+    // Only the button leaves the mode. Saving and other edits also write the pending
+    // edits (through PageView::commitPendingEdits -> applyRequested), and those must
+    // not throw the user out of the mode, so the exit lives here and not in
+    // applyReconstruction().
     connect(m_applyReconstructionAction, &QAction::triggered, this, [this]() {
         applyReconstruction();
 
+        // Pending edits left over means the write failed and they were put back:
+        // stay in the mode so the user can retry or fix them.
         if (!m_reconstructAction->isChecked()
             || m_view->reconstruction()->pendingCount() > 0)
             return;
 
+        // Leaving the mode clears the status bar, which would wipe the "Applied ..."
+        // message, so show it again afterwards.
         const QString message = statusBar()->currentMessage();
         m_reconstructAction->setChecked(false);
         if (!message.isEmpty())
@@ -61,10 +84,12 @@ void MainWindow::setupReconstruction()
     connect(m_reconstructAction, &QAction::toggled, this, [this, overlay](bool on) {
         if (on) {
             m_view->commitPendingEdits();
+            // The overlay ignores results until it is active, so this has to
+            // come BEFORE the request (a cached page answers immediately).
             overlay->setActive(true);
             requestReconstruction();
         } else {
-            overlay->setActive(false);
+            overlay->setActive(false); // applies the pending edits first
             statusBar()->clearMessage();
         }
     });
@@ -78,6 +103,7 @@ void MainWindow::setupReconstruction()
             [this, overlay](int page,
                             std::shared_ptr<const Reconstruction::ReconstructedPage> result,
                             int source, const QString &note) {
+                // Results can arrive after the user scrolled away or switched it off.
                 if (!m_reconstructAction->isChecked() || page != m_view->currentPage())
                     return;
 
@@ -130,6 +156,7 @@ void MainWindow::requestReconstruction()
     m_reconstruction->requestPage(m_view->currentPage());
 }
 
+// Called whenever the file the viewer shows changes (open, edit, undo, save).
 void MainWindow::updateReconstructionSource(const DocumentSource &source)
 {
     if (!m_reconstruction)
@@ -141,6 +168,15 @@ void MainWindow::updateReconstructionSource(const DocumentSource &source)
         requestReconstruction();
 }
 
+// Writes every pending edit into the PDF, on however many pages.
+//
+//   1. placeSpans() lays each edit's text out exactly as the editor box showed it
+//      and returns pieces with absolute positions (page points).
+//   2. replaceTexts() does one page at a time: it erases ALL the old text first,
+//      then draws the new pieces as real PDF text, so the result stays
+//      selectable and searchable.
+//   3. refreshAfterPageEdit() snapshots the file once (a single undo step for the
+//      whole batch) and re-renders the changed pages.
 void MainWindow::applyReconstruction()
 {
     if (!m_editor || m_viewOnly)
@@ -151,11 +187,16 @@ void MainWindow::applyReconstruction()
     if (pending.isEmpty())
         return;
 
+    // The document is about to change: drop the page overlay so a click can't act
+    // on stale paragraphs. It is rebuilt when the new page text arrives.
     overlay->reset();
 
+    // The PDF's own font, when this computer has it as a plain TrueType file that
+    // may be embedded. Anything else keeps its standard font, and so does a font
+    // that fails to embed. Set to false to always use the standard fonts.
     constexpr bool kEmbedSystemFonts = true;
-    QHash<QString, QByteArray> fontFiles;
-    QStringList notEmbedded;
+    QHash<QString, QByteArray> fontFiles; // by key; an empty value means "not available"
+    QStringList notEmbedded;              // installed fonts that could not be embedded
 
     QMap<int, QVector<PdfEditor::TextReplacement>> byPage;
     for (const PendingReconstructionEdit &item : std::as_const(pending)) {
@@ -165,6 +206,10 @@ void MainWindow::applyReconstruction()
 
         PdfEditor::TextReplacement replacement;
         replacement.eraseArea = edit.paragraph.bounds;
+        // A page with a real text layer: the old glyphs are removed, so no background
+        // rectangle is painted (that would also hide a photo or colored shape behind
+        // the text). A scan has no glyphs to remove, so its old text is covered with
+        // the estimated background color instead.
         replacement.fillColor = edit.fromTextLayer ? QColor() : edit.paragraph.backgroundColor;
         replacement.removeOriginalText = edit.fromTextLayer;
 
@@ -201,8 +246,12 @@ void MainWindow::applyReconstruction()
         byPage[edit.page].append(replacement);
     }
 
+    // Reconstruct mode stays on through this: the guard's updateActions() leaves
+    // it alone.
     EditOperationGuard operation(this);
 
+    // If writing fails, the document goes back to its last saved state and the
+    // user's edits are put back as pending instead of being lost.
     auto giveUp = [&]() {
         reopenEditor(m_history.current());
         overlay->restorePending(pending);
@@ -227,6 +276,7 @@ void MainWindow::applyReconstruction()
     }
 
     if (!refreshAfterPageEdit(pages, m_view->currentPage())) {
+        // refreshAfterPageEdit already reported the error and reloaded the document.
         overlay->restorePending(pending);
         if (m_reconstructAction->isChecked())
             requestReconstruction();
@@ -262,4 +312,18 @@ void MainWindow::discardReconstruction()
 
     overlay->discardPending();
     statusBar()->showMessage("Discarded the pending reconstruction edits.", 4000);
+}
+
+// Used by Save and Save As: writes the waiting reconstruct edits and leaves the mode.
+// Switching the mode off writes the edits first (ReconstructionOverlay::setActive ->
+// flush -> applyRequested -> applyReconstruction). With nothing waiting it does nothing,
+// so Ctrl+S after only looking at a page does not throw you out of the mode.
+// Returns false when the edits could not be written: they are back in the overlay, the
+// warning has been shown, and the caller should not save.
+bool MainWindow::applyAndLeaveReconstruction()
+{
+    ReconstructionOverlay *overlay = m_view->reconstruction();
+    if (m_reconstructAction->isChecked() && overlay->hasPendingEdit())
+        m_reconstructAction->setChecked(false);
+    return overlay->pendingCount() == 0;
 }

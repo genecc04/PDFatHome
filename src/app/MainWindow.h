@@ -67,9 +67,10 @@ private:
     void updateReconstructionSource(const DocumentSource &source);
     void applyReconstruction();
     void discardReconstruction();
+    bool applyAndLeaveReconstruction();
     void setupMenus();
     void setupToolbar();
-    void setupImageToolbar();
+    void setupImageActions();
     void setupToolsToolbar();
     void setupToolsPane();
 

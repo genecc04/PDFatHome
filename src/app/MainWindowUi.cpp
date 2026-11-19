@@ -49,7 +49,8 @@ constexpr int kToolbarIconSize = 32;
 constexpr int kNumericControlWidth = 88;
 
 // The pages of the Tools pane, in the order they are added to its stack.
-enum ToolsPage { kToolsPageNone = 0, kToolsPageText, kToolsPageDraw, kToolsPageRedaction };
+enum ToolsPage { kToolsPageNone = 0, kToolsPageText, kToolsPageDraw, kToolsPageRedaction,
+                 kToolsPageImage };
 
 // A letter drawn as a toolbar icon, so the B / I / U buttons need no image files.
 QIcon styleIcon(const QString &letter, bool bold, bool italic, bool underline)
@@ -595,34 +596,34 @@ void MainWindow::setupToolbar()
     });
 }
 
-void MainWindow::setupImageToolbar()
+// Add image sits on the Tools toolbar. Crop, delete and cancel are only actions here;
+// their buttons are on the Image page of the Tools pane (setupToolsPane).
+void MainWindow::setupImageActions()
 {
-    QToolBar *toolbar = makeToolbar(this, "Image", "imageToolbar");
-
-    toolbar->addAction(m_addImageAction);
     m_addImageAction->setIcon(QIcon(":/icons/addimage.png"));
-    toolbar->addSeparator();
+    m_addImageAction->setIconText("Add image"); // the toolbar label, without the "..."
 
-    m_cropImageAction = toolbar->addAction("Crop");
-    m_cropImageAction->setIcon(QIcon(":/icons/crop.png"));
+    m_cropImageAction = new QAction(QIcon(":/icons/crop.png"), "Crop image", this);
     m_cropImageAction->setCheckable(true);
     m_cropImageAction->setEnabled(false);
+    m_cropImageAction->setToolTip("Crop the image being placed: drag a corner inward");
     connect(m_cropImageAction, &QAction::toggled,
             m_view, &PageView::setImageCropMode);
 
-    m_deleteImageAction = toolbar->addAction("Delete");
-    m_deleteImageAction->setIcon(QIcon(":/icons/deleteimage.png"));
+    m_deleteImageAction = new QAction(QIcon(":/icons/deleteimage.png"),
+                                      "Delete selected image", this);
     m_deleteImageAction->setEnabled(false);
     m_deleteImageAction->setToolTip("Delete selected added image");
     connect(m_deleteImageAction, &QAction::triggered,
             m_view, &PageView::deleteSelectedImageStamp);
 
-    m_cancelImageAction = toolbar->addAction("Cancel");
-    m_cancelImageAction->setIcon(QIcon(":/icons/cancelimage.png"));
+    m_cancelImageAction = new QAction(QIcon(":/icons/cancelimage.png"),
+                                      "Cancel placement", this);
     m_cancelImageAction->setEnabled(false);
+    m_cancelImageAction->setToolTip("Stop placing the image (Esc)");
     m_cancelImageAction->setShortcut(QKeySequence(Qt::Key_Escape));
     m_cancelImageAction->setShortcutContext(Qt::WindowShortcut);
-    addAction(m_cancelImageAction);
+    addAction(m_cancelImageAction); // the shortcut works without a button on screen
     connect(m_cancelImageAction, &QAction::triggered,
             m_view, &PageView::cancelImagePlacement);
 }
@@ -656,6 +657,11 @@ void MainWindow::setupToolsToolbar()
     toolbar->addAction(m_drawAction);
     m_drawAction->setIcon(QIcon(":/icons/draw.png"));
     m_drawAction->setToolTip("Draw on the PDF (active when checked)");
+
+    toolbar->addSeparator();
+
+    // Adding an image. Crop, delete and cancel are on the Image page of the Tools pane.
+    toolbar->addAction(m_addImageAction);
 
     toolbar->addSeparator();
 
@@ -783,16 +789,26 @@ void MainWindow::setupToolsPane()
     auto *reconFontBox = new QFontComboBox;
     reconFontBox->setEditable(false);
     reconFontBox->setFontFilters(QFontComboBox::ScalableFonts);
-    reconFontBox->view()->setMinimumWidth(260);
+    reconFontBox->setMaxVisibleItems(10);
     reconFontBox->setFocusPolicy(Qt::NoFocus);
     reconFontBox->setProperty("textEditorStyleControl", true);
     reconFontBox->setToolTip("Font of the selected text");
 
-    // Both boxes share one form row; the stack shows one of them.
-    auto *fontStack = new QStackedWidget;
-    fontStack->addWidget(m_fontBox);
-    fontStack->addWidget(reconFontBox);
-    textForm->addRow("Font:", fontStack);
+    // Open each drop-down list below its box. The default lays the list over the box
+    // with the current item on top, which for a long font list covered most of the pane.
+    const QString dropDownStyle = QStringLiteral("QComboBox { combobox-popup: 0; }");
+    m_fontBox->setStyleSheet(dropDownStyle);
+    reconFontBox->setStyleSheet(dropDownStyle);
+
+    // Both boxes share one form row and only one is visible at a time. (A
+    // QStackedWidget here stretched the box to the height of the whole pane: a stacked
+    // layout ignores the size policy of what it holds.)
+    auto *fontRow = new QVBoxLayout;
+    fontRow->setContentsMargins(0, 0, 0, 0);
+    fontRow->addWidget(m_fontBox);
+    fontRow->addWidget(reconFontBox);
+    reconFontBox->setVisible(false);
+    textForm->addRow("Font:", fontRow);
 
     m_fontSizeBox = new QSpinBox;
     m_fontSizeBox->setRange(6, 200);
@@ -866,6 +882,7 @@ void MainWindow::setupToolsPane()
     mode->addItem("White-out");
     mode->addItem("Eraser");
     mode->setFocusPolicy(Qt::NoFocus);
+    mode->setStyleSheet(dropDownStyle);
     drawForm->addRow("Tool:", mode);
 
     auto *size = new QSpinBox;
@@ -928,6 +945,36 @@ void MainWindow::setupToolsPane()
     redactionPageLayout->addWidget(redactionGroup);
     stack->addWidget(redactionPage);
 
+    // ---- page 4: image ----------------------------------------------------------
+    // Shown while an image (or an E-sign mark) is being placed, and while an added
+    // image is selected. The buttons are the actions that used to be on the Image toolbar.
+    auto *imagePage = new QWidget;
+    auto *imagePageLayout = new QVBoxLayout(imagePage);
+    auto *imageGroup = new QGroupBox("Image");
+    auto *imageLayout = new QVBoxLayout(imageGroup);
+
+    auto *imageHint = new QLabel(
+        "Drag the image to move it, or a corner to resize it. While placing: Enter places "
+        "it and Esc cancels.");
+    imageHint->setWordWrap(true);
+    imageLayout->addWidget(imageHint);
+
+    for (QAction *action : { m_cropImageAction, m_deleteImageAction, m_cancelImageAction }) {
+        auto *button = new QToolButton;
+        button->setDefaultAction(action);
+        button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+        button->setIconSize(QSize(24, 24));
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+        // Crop stays "pressed in" while cropping.
+        button->setStyleSheet(QStringLiteral(
+            "QToolButton:checked { border: 2px solid palette(highlight); border-radius: 4px; }"));
+        imageLayout->addWidget(button);
+    }
+
+    imagePageLayout->addWidget(imageGroup);
+    imagePageLayout->addStretch();
+    stack->addWidget(imagePage);
+
     // ---- the dock -------------------------------------------------------------------
     // The pane sits in a scroll area so a short window can still reach everything.
     auto *scroll = new QScrollArea;
@@ -962,6 +1009,8 @@ void MainWindow::setupToolsPane()
             page = kToolsPageText;
         else if (m_drawAction->isChecked())
             page = kToolsPageDraw;
+        else if (m_view->hasActiveImagePlacement() || m_view->hasSelectedImageStamp())
+            page = kToolsPageImage;
         else if (m_redactAction->isChecked() || m_view->hasRedactionAreas())
             page = kToolsPageRedaction;
 
@@ -980,6 +1029,11 @@ void MainWindow::setupToolsPane()
     // The redaction tool can switch itself off (Esc) with its action's signals
     // blocked, so it is watched from the view as well.
     connect(m_view, &PageView::redactionToolChanged, this,
+            [updatePane](bool) { updatePane(); });
+    // An image starts or stops being placed, or an added image is selected or not.
+    connect(m_view, &PageView::imagePlacementStateChanged, this,
+            [updatePane](bool, bool) { updatePane(); });
+    connect(m_view, &PageView::imageStampSelectionChanged, this,
             [updatePane](bool) { updatePane(); });
     // Also emitted when a text editor opens or closes.
     connect(m_view, &PageView::pendingChangesChanged, this, [updatePane]() { updatePane(); });
@@ -1081,8 +1135,9 @@ void MainWindow::setupToolsPane()
         m_underlineAction->setChecked(format.underlined);
     });
     connect(overlay, &ReconstructionOverlay::editingChanged, this,
-            [showTextBoxStyle, fontStack](bool editing) {
-        fontStack->setCurrentIndex(editing ? 1 : 0);
+            [this, reconFontBox, showTextBoxStyle](bool editing) {
+        m_fontBox->setVisible(!editing);
+        reconFontBox->setVisible(editing);
         if (!editing)
             showTextBoxStyle(); // back to the style for new text boxes
     });

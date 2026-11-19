@@ -532,6 +532,9 @@ void MainWindow::dropEvent(QDropEvent *event)
 
 bool MainWindow::saveAs()
 {
+    // Saving writes the waiting reconstruct edits and leaves reconstruct mode.
+    if (!applyAndLeaveReconstruction())
+        return false;
     m_view->commitPendingEdits();
     if (!m_editor)
         return false;
@@ -928,6 +931,9 @@ void MainWindow::showDigitalSignatures()
 
 bool MainWindow::save()
 {
+    // Saving writes the waiting reconstruct edits and leaves reconstruct mode.
+    if (!applyAndLeaveReconstruction())
+        return false;
     m_view->commitPendingEdits();
     if (!m_editor || !isDocumentModified())
         return true;
