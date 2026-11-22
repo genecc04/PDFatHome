@@ -25,6 +25,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QMouseEvent>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPainter>
 #include <QPen>
@@ -436,6 +437,11 @@ namespace {
     {
         return AnnotationFonts::pdfName(style.family, style.bold, style.italic);
     }
+
+    int annotationAlignment(const PageView::TextStyle &style)
+    {
+        return AnnotationFonts::alignmentCode(style.alignment);
+    }
 }
 
 QList<int> MainWindow::targetPages() const
@@ -745,7 +751,7 @@ void MainWindow::placeText(int page, const QRectF &box, const QString &text,
     if (!m_editor->addTextBox(page, box, text, annotationFontName(style),
                               style.sizePoints, style.color.redF(),
                               style.color.greenF(), style.color.blueF(),
-                              style.underline)) {
+                              style.underline, annotationAlignment(style))) {
         QMessageBox::warning(this, "Add text failed", m_editor->lastError());
         reopenEditor(m_history.current());
         updateActions();
@@ -773,7 +779,8 @@ void MainWindow::updateTextAnnotation(int page, int annotationId,
     if (!m_editor->updateTextAnnotation(page, annotationId, oldText, newText,
                                         annotationFontName(style), style.sizePoints,
                                         style.color.redF(), style.color.greenF(),
-                                        style.color.blueF(), style.underline)) {
+                                        style.color.blueF(), style.underline,
+                                        annotationAlignment(style))) {
         QMessageBox::warning(this, "Edit added text", m_editor->lastError());
         reopenEditor(m_history.current());
         updateActions();
@@ -956,107 +963,88 @@ void MainWindow::saveESignature(const QImage &image, const QString &name)
         QString("Saved \"%1\" on this device for reuse.")
             .arg(QFileInfo(fileName).completeBaseName()),
         5000);
+    refreshESignatureList();
 }
 
-void MainWindow::manageESignatures()
+void MainWindow::refreshESignatureList()
 {
+    if (!m_signatureList)
+        return;
+
+    m_signatureList->clear();
+
     QString error;
     const QString directory = signatureStorageDirectory(&error);
-    if (directory.isEmpty()) {
-        QMessageBox::warning(this, "Saved signatures", error);
-        return;
-    }
-
-    QDialog dialog(this);
-    dialog.setWindowTitle("Saved signatures");
-    auto *layout = new QVBoxLayout(&dialog);
-    layout->addWidget(new QLabel(
-        "Saved signatures are stored locally on this device.", &dialog));
-    auto *list = new QListWidget(&dialog);
-    list->setIconSize(QSize(240, 82));
-    list->setMinimumSize(460, 200);
-    layout->addWidget(list);
-
-    const auto refreshList = [list, directory](const QString &selectedPath = QString()) {
-        list->clear();
-        const QDir folder(directory);
-        const QFileInfoList files = folder.entryInfoList(
+    if (!directory.isEmpty()) {
+        const QFileInfoList files = QDir(directory).entryInfoList(
             QStringList() << "*.png", QDir::Files, QDir::Name);
         for (const QFileInfo &info : files) {
             QString imageError;
             const QImage image = readImageFile(info.absoluteFilePath(), &imageError);
             auto *item = new QListWidgetItem(
                 image.isNull() ? QIcon() : signaturePreviewIcon(image),
-                info.completeBaseName(), list);
+                info.completeBaseName(), m_signatureList);
             item->setData(Qt::UserRole, info.absoluteFilePath());
-            if (image.isNull())
-                item->setToolTip("Preview unavailable: " + imageError);
-            if (!selectedPath.isEmpty()
-                && info.absoluteFilePath() == selectedPath)
-                list->setCurrentItem(item);
+            item->setToolTip(image.isNull()
+                                 ? "Preview unavailable: " + imageError
+                                 : "Click to place " + info.completeBaseName());
         }
-    };
-    refreshList();
-    dialog.resize(600, 400);
+    }
 
-    auto *buttons = new QHBoxLayout;
-    auto *useButton = new QPushButton("Use selected", &dialog);
-    auto *renameButton = new QPushButton("Rename...", &dialog);
-    auto *deleteButton = new QPushButton("Delete selected", &dialog);
-    auto *closeButton = new QPushButton("Close", &dialog);
-    useButton->setDefault(true);
-    buttons->addWidget(useButton);
-    buttons->addWidget(renameButton);
-    buttons->addWidget(deleteButton);
-    buttons->addStretch();
-    buttons->addWidget(closeButton);
-    layout->addLayout(buttons);
+    const bool empty = m_signatureList->count() == 0;
+    m_signatureList->setVisible(!empty);
+    if (m_signatureEmptyLabel)
+        m_signatureEmptyLabel->setVisible(empty);
+}
 
-    connect(useButton, &QPushButton::clicked, &dialog, [&dialog, list]() {
-        if (list->currentItem())
-            dialog.accept();
-    });
-    connect(list, &QListWidget::itemDoubleClicked, &dialog,
-            [&dialog](QListWidgetItem *) { dialog.accept(); });
-    connect(renameButton, &QPushButton::clicked, &dialog,
-            [this, list, directory, refreshList]() {
-        QListWidgetItem *item = list->currentItem();
-        if (!item)
-            return;
+void MainWindow::useSavedESignature(const QString &filePath)
+{
+    QString error;
+    const QImage image = readImageFile(filePath, &error);
+    if (image.isNull()) {
+        QMessageBox::warning(this, "Use saved signature",
+                             "Could not read that signature: " + error);
+        return;
+    }
+    beginESignaturePlacement(image);
+}
 
-        const QString oldPath = item->data(Qt::UserRole).toString();
-        const QString oldName = item->text();
+void MainWindow::showESignatureMenu(const QPoint &position)
+{
+    QListWidgetItem *item = m_signatureList->itemAt(position);
+    if (!item)
+        return;
+
+    const QString path = item->data(Qt::UserRole).toString();
+    const QString name = item->text();
+
+    QMenu menu(this);
+    QAction *rename = menu.addAction("Rename...");
+    QAction *remove = menu.addAction("Delete");
+    const QAction *chosen = menu.exec(m_signatureList->viewport()->mapToGlobal(position));
+
+    if (chosen && chosen == rename) {
         bool accepted = false;
         const QString requestedName = QInputDialog::getText(
             this, "Rename saved signature", "Signature name:",
-            QLineEdit::Normal, oldName, &accepted).trimmed();
+            QLineEdit::Normal, name, &accepted).trimmed();
         if (!accepted || requestedName.isEmpty())
             return;
 
-        const QString newName = safeSignatureName(requestedName);
-        const QDir folder(directory);
-        const QString newFileName =
-            uniqueSignatureFileName(folder, newName, oldPath);
-        const QString newPath = folder.filePath(newFileName);
-        if (QFileInfo(oldPath).absoluteFilePath()
-            == QFileInfo(newPath).absoluteFilePath())
+        const QDir folder(QFileInfo(path).absolutePath());
+        const QString newPath = folder.filePath(
+            uniqueSignatureFileName(folder, safeSignatureName(requestedName), path));
+        if (QFileInfo(path).absoluteFilePath() == QFileInfo(newPath).absoluteFilePath())
             return;
 
-        QFile file(oldPath);
+        QFile file(path);
         if (!file.rename(newPath)) {
             QMessageBox::warning(this, "Rename saved signature",
-                                 "Could not rename the signature: "
-                                     + file.errorString());
+                                 "Could not rename the signature: " + file.errorString());
             return;
         }
-        refreshList(newPath);
-    });
-    connect(deleteButton, &QPushButton::clicked, &dialog,
-            [this, list, refreshList]() {
-        QListWidgetItem *item = list->currentItem();
-        if (!item)
-            return;
-        const QString name = item->text();
+        refreshESignatureList();
+    } else if (chosen && chosen == remove) {
         if (QMessageBox::question(
                 this, "Delete saved signature",
                 QString("Delete \"%1\" from this device?").arg(name),
@@ -1064,28 +1052,14 @@ void MainWindow::manageESignatures()
             != QMessageBox::Yes)
             return;
 
-        QFile file(item->data(Qt::UserRole).toString());
+        QFile file(path);
         if (!file.remove()) {
             QMessageBox::warning(this, "Delete saved signature",
                                  "Could not delete the signature: " + file.errorString());
             return;
         }
-        refreshList();
-    });
-    connect(closeButton, &QPushButton::clicked, &dialog, &QDialog::reject);
-
-    if (dialog.exec() != QDialog::Accepted || !list->currentItem())
-        return;
-
-    QString imageError;
-    const QString filePath = list->currentItem()->data(Qt::UserRole).toString();
-    const QImage image = readImageFile(filePath, &imageError);
-    if (image.isNull()) {
-        QMessageBox::warning(this, "Use saved signature",
-                             "Could not read that signature: " + imageError);
-        return;
+        refreshESignatureList();
     }
-    beginESignaturePlacement(image);
 }
 
 void MainWindow::beginESignaturePlacement(const QImage &image)
@@ -1125,6 +1099,29 @@ void MainWindow::placeImage(int page, const QRectF &box, const QImage &image)
 
     if (!m_editor->addImageStamp(page, box, data)) {
         QMessageBox::warning(this, "Add image failed", m_editor->lastError());
+        reopenEditor(m_history.current());
+        updateActions();
+        return;
+    }
+    refreshAfterPageEdit({ page }, page);
+}
+
+void MainWindow::replaceImageStamp(int page, const QString &oldId, const QRectF &box,
+                                   const QImage &image)
+{
+    if (!m_editor)
+        return;
+    EditOperationGuard operation(this);
+
+    const QByteArray data = encodeImageForPdf(image);
+    if (data.isEmpty()) {
+        QMessageBox::warning(this, "Crop image failed", "Could not prepare the image.");
+        return;
+    }
+
+    if (!m_editor->deleteImageStamp(page, oldId)
+        || !m_editor->addImageStamp(page, box, data)) {
+        QMessageBox::warning(this, "Crop image failed", m_editor->lastError());
         reopenEditor(m_history.current());
         updateActions();
         return;

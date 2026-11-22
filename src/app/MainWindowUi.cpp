@@ -48,11 +48,9 @@ namespace
 constexpr int kToolbarIconSize = 32;
 constexpr int kNumericControlWidth = 88;
 
-// The pages of the Tools pane, in the order they are added to its stack.
 enum ToolsPage { kToolsPageNone = 0, kToolsPageText, kToolsPageDraw, kToolsPageRedaction,
-                 kToolsPageImage };
+                 kToolsPageImage, kToolsPageESign };
 
-// A letter drawn as a toolbar icon, so the B / I / U buttons need no image files.
 QIcon styleIcon(const QString &letter, bool bold, bool italic, bool underline)
 {
     const qreal dpr = qApp->devicePixelRatio();
@@ -70,6 +68,36 @@ QIcon styleIcon(const QString &letter, bool bold, bool italic, bool underline)
     painter.setFont(font);
     painter.setPen(qApp->palette().color(QPalette::ButtonText));
     painter.drawText(QRect(0, 0, kToolbarIconSize, kToolbarIconSize), Qt::AlignCenter, letter);
+    painter.end();
+    return QIcon(pixmap);
+}
+
+QIcon alignIcon(Qt::AlignmentFlag alignment)
+{
+    const qreal dpr = qApp->devicePixelRatio();
+    QPixmap pixmap(QSize(kToolbarIconSize, kToolbarIconSize) * dpr);
+    pixmap.setDevicePixelRatio(dpr);
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setPen(QPen(qApp->palette().color(QPalette::ButtonText), 2.0, Qt::SolidLine,
+                        Qt::FlatCap));
+    const qreal left = kToolbarIconSize * 0.18;
+    const qreal fullWidth = kToolbarIconSize * 0.64;
+    for (int line = 0; line < 5; ++line) {
+        const qreal y = kToolbarIconSize * (0.2 + line * 0.15);
+        qreal share = (line % 2 == 0) ? 1.0 : 0.6;
+        if (alignment == Qt::AlignJustify)
+            share = (line == 4) ? 0.6 : 1.0;
+        const qreal width = fullWidth * share;
+
+        qreal x = left;
+        if (alignment == Qt::AlignHCenter)
+            x = left + (fullWidth - width) / 2.0;
+        else if (alignment == Qt::AlignRight)
+            x = left + fullWidth - width;
+        painter.drawLine(QPointF(x, y), QPointF(x + width, y));
+    }
     painter.end();
     return QIcon(pixmap);
 }
@@ -117,10 +145,8 @@ void MainWindow::setupViewer()
             this, &MainWindow::updateImageStampBounds);
     connect(m_view, &PageView::imageStampDeleteRequested,
             this, &MainWindow::deleteImageStamp);
-    connect(m_view, &PageView::imageStampSelectionChanged, this, [this](bool selected) {
-        if (m_deleteImageAction)
-            m_deleteImageAction->setEnabled(
-                selected && m_editor != nullptr && !m_documentLoadPending);
+    connect(m_view, &PageView::imageStampSelectionChanged, this, [this](bool) {
+        updateActions();
     });
     connect(m_view, &PageView::textToolFinished, this, [this]() {
         m_addTextAction->setChecked(false);
@@ -156,6 +182,7 @@ void MainWindow::setupViewer()
         m_signAction->setChecked(active);
     });
     connect(m_view, &PageView::imagePlaced, this, &MainWindow::placeImage);
+    connect(m_view, &PageView::imageStampReplaced, this, &MainWindow::replaceImageStamp);
     connect(m_view, &PageView::imagePlacementStateChanged, this,
             [this](bool active, bool positioned) {
         m_cancelImageAction->setEnabled(active && !m_documentLoadPending);
@@ -198,15 +225,18 @@ void MainWindow::setupViewer()
             double fontSize = 12.0;
             QColor color;
             bool underline = false;
+            int alignment = 0;
             if (!m_editor || m_viewOnly
                 || !m_editor->textAnnotationAt(page, point, annotationId, bounds, text,
-                                               &fontName, &fontSize, &color, &underline))
+                                               &fontName, &fontSize, &color, &underline,
+                                               &alignment))
                 return false;
 
             style->family = AnnotationFonts::family(fontName);
             style->bold = AnnotationFonts::isBold(fontName);
             style->italic = AnnotationFonts::isItalic(fontName);
             style->underline = underline;
+            style->alignment = AnnotationFonts::alignmentFromCode(alignment);
             style->sizePoints = fontSize;
             style->color = color;
             return true;
@@ -480,12 +510,20 @@ void MainWindow::setupMenus()
         }
     });
 
+    m_esignAction = editMenu->addAction("E-sign");
+    m_esignAction->setCheckable(true);
+    connect(m_esignAction, &QAction::toggled, this, [this](bool on) {
+        if (on)
+            m_view->commitPendingEdits();
+    });
+
     auto *toolGroup = new QActionGroup(this);
     toolGroup->setExclusionPolicy(QActionGroup::ExclusionPolicy::ExclusiveOptional);
     toolGroup->addAction(m_addTextAction);
     toolGroup->addAction(m_drawAction);
     toolGroup->addAction(m_redactAction);
     toolGroup->addAction(m_signAction);
+    toolGroup->addAction(m_esignAction);
     toolGroup->addAction(m_reconstructAction);
     editMenu->addAction(m_reconstructAction);
     editMenu->addAction(m_applyReconstructionAction);
@@ -596,19 +634,22 @@ void MainWindow::setupToolbar()
     });
 }
 
-// Add image sits on the Tools toolbar. Crop, delete and cancel are only actions here;
-// their buttons are on the Image page of the Tools pane (setupToolsPane).
 void MainWindow::setupImageActions()
 {
     m_addImageAction->setIcon(QIcon(":/icons/addimage.png"));
-    m_addImageAction->setIconText("Add image"); // the toolbar label, without the "..."
+    m_addImageAction->setIconText("Add image");
 
     m_cropImageAction = new QAction(QIcon(":/icons/crop.png"), "Crop image", this);
     m_cropImageAction->setCheckable(true);
     m_cropImageAction->setEnabled(false);
-    m_cropImageAction->setToolTip("Crop the image being placed: drag a corner inward");
-    connect(m_cropImageAction, &QAction::toggled,
-            m_view, &PageView::setImageCropMode);
+    m_cropImageAction->setToolTip(
+        "Crop the image being placed, or an image you added earlier: drag a corner inward");
+    connect(m_cropImageAction, &QAction::toggled, this, [this](bool on) {
+        if (on && m_view->hasSelectedImageStamp() && !m_view->hasActiveImagePlacement())
+            m_view->beginImageStampCrop();
+        else
+            m_view->setImageCropMode(on);
+    });
 
     m_deleteImageAction = new QAction(QIcon(":/icons/deleteimage.png"),
                                       "Delete selected image", this);
@@ -623,15 +664,13 @@ void MainWindow::setupImageActions()
     m_cancelImageAction->setToolTip("Stop placing the image (Esc)");
     m_cancelImageAction->setShortcut(QKeySequence(Qt::Key_Escape));
     m_cancelImageAction->setShortcutContext(Qt::WindowShortcut);
-    addAction(m_cancelImageAction); // the shortcut works without a button on screen
+    addAction(m_cancelImageAction);
     connect(m_cancelImageAction, &QAction::triggered,
             m_view, &PageView::cancelImagePlacement);
 }
 
 void MainWindow::setupToolsToolbar()
 {
-    // One toolbar holds the buttons that pick a tool. What a tool is set to (font,
-    // ink, marked areas...) lives in the Tools pane on the right: setupToolsPane().
     QToolBar *toolbar = makeToolbar(this, "Tools", "toolsToolbar",
                                     Qt::ToolButtonTextBesideIcon, true);
 
@@ -640,16 +679,12 @@ void MainWindow::setupToolsToolbar()
     m_addTextAction->setIcon(QIcon(":/icons/addtext.png"));
     m_addTextAction->setToolTip("Add text to the PDF (active when checked)");
 
-    m_deleteTextAction = toolbar->addAction("Delete");
-    m_deleteTextAction->setIcon(QIcon(":/icons/deletetext.png"));
+    m_deleteTextAction = new QAction(QIcon(":/icons/deletetext.png"),
+                                     "Delete selected text box", this);
     m_deleteTextAction->setEnabled(false);
     m_deleteTextAction->setToolTip("Delete selected text box");
     connect(m_deleteTextAction, &QAction::triggered,
             m_view, &PageView::deleteSelectedTextAnnotation);
-    if (QToolButton *button = qobject_cast<QToolButton *>(
-            toolbar->widgetForAction(m_deleteTextAction))) {
-        button->setToolButtonStyle(Qt::ToolButtonIconOnly);
-    }
 
     toolbar->addSeparator();
 
@@ -660,19 +695,16 @@ void MainWindow::setupToolsToolbar()
 
     toolbar->addSeparator();
 
-    // Adding an image. Crop, delete and cancel are on the Image page of the Tools pane.
     toolbar->addAction(m_addImageAction);
 
     toolbar->addSeparator();
 
-    // Editing text that is already in the PDF. The menu keeps its long name; a
-    // toolbar button shows the short "icon text" instead.
+    m_reconstructAction->setIcon(QIcon(":/icons/reconstruct.png"));
     m_reconstructAction->setIconText("Reconstruct");
     toolbar->addAction(m_reconstructAction);
 
     toolbar->addSeparator();
 
-    // Redaction (the list of marked areas and the Apply button are in the pane)
     toolbar->addAction(m_redactAction);
     m_redactAction->setIcon(QIcon(":/icons/markredaction.png"));
     m_redactAction->setText("Mark redaction");
@@ -681,52 +713,20 @@ void MainWindow::setupToolsToolbar()
 
     toolbar->addSeparator();
 
-    m_esignButton = new QToolButton(toolbar);
-    m_esignButton->setText("E-sign");
-    m_esignButton->setIcon(QIcon(":/icons/esign.png"));
-    m_esignButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    m_esignButton->setPopupMode(QToolButton::InstantPopup);
-    m_esignButton->setStyleSheet(
-        "QToolButton::menu-indicator {"
-        " subcontrol-position: bottom right;"
-        " right: 0px; bottom: 0px;"
-        " width: 0px; height: 0px;"
-        "}");
-    m_esignButton->setToolTip(
+    toolbar->addAction(m_esignAction);
+    m_esignAction->setIcon(QIcon(":/icons/esign.png"));
+    m_esignAction->setToolTip(
         "Add a visible electronic signature mark. This is not a certificate-based "
         "digital signature.");
-    auto *eSignatureMenu = new QMenu(m_esignButton);
-    m_esignTypeAction = eSignatureMenu->addAction("Type signature...");
-    connect(m_esignTypeAction, &QAction::triggered,
-            this, &MainWindow::addTypedESignature);
-    m_esignDrawAction = eSignatureMenu->addAction("Draw signature...");
-    connect(m_esignDrawAction, &QAction::triggered,
-            this, &MainWindow::drawESignature);
-    m_esignUploadAction = eSignatureMenu->addAction("Upload signature image...");
-    connect(m_esignUploadAction, &QAction::triggered,
-            this, &MainWindow::uploadESignature);
-    eSignatureMenu->addSeparator();
-    m_manageESignaturesAction = eSignatureMenu->addAction("Saved signatures...");
-    connect(m_manageESignaturesAction, &QAction::triggered,
-            this, &MainWindow::manageESignatures);
-    m_esignButton->setMenu(eSignatureMenu);
-    toolbar->addWidget(m_esignButton);
 
     m_signAction->setToolTip(
         "Sign a separate PDF copy using a certificate and private key.");
 }
 
-// The Tools pane: a dock on the right with one page per tool. A QStackedWidget
-// shows the page of whichever tool is active (updatePane below decides which);
-// with no tool active it shows a short "select a tool" note.
-//
-// Nothing here is new logic. The text and drawing controls are the same ones that
-// used to sit in two toolbars, with the same handlers, moved into form layouts.
 void MainWindow::setupToolsPane()
 {
     ReconstructionOverlay *overlay = m_view->reconstruction();
 
-    // A widget put at the left of its form row instead of stretched across it.
     const auto leftAligned = [](QWidget *widget) {
         auto *row = new QHBoxLayout;
         row->setContentsMargins(0, 0, 0, 0);
@@ -735,9 +735,6 @@ void MainWindow::setupToolsPane()
         return row;
     };
 
-    // A push button that mirrors an action: clicking triggers it, and it is
-    // enabled and disabled together with it. It never takes keyboard focus, so
-    // pressing it does not count as leaving a text editor.
     const auto actionButton = [](QAction *action, const QString &text) {
         auto *button = new QPushButton(text);
         button->setToolTip(action->toolTip());
@@ -753,29 +750,24 @@ void MainWindow::setupToolsPane()
     auto *stack = new QStackedWidget;
     stack->setMinimumWidth(230);
 
-    // ---- page 0: no tool active ---------------------------------------------
+    // no tool active
     auto *nonePage = new QWidget;
     auto *noneLayout = new QVBoxLayout(nonePage);
     auto *noneLabel = new QLabel("Select a tool on the toolbar to see its options here.");
     noneLabel->setWordWrap(true);
     noneLabel->setAlignment(Qt::AlignCenter);
-    noneLabel->setEnabled(false); // greyed text, whatever the theme
+    noneLabel->setEnabled(false);
     noneLayout->addWidget(noneLabel);
     stack->addWidget(nonePage);
 
-    // ---- page 1: text (also used by reconstruct mode) -------------------------
+    // page 1: text
     auto *textPage = new QWidget;
     auto *textPageLayout = new QVBoxLayout(textPage);
 
     auto *textGroup = new QGroupBox("Text");
-    // Moving focus to one of these controls must not count as leaving the text
-    // editor (see the same check in PageView and ReconstructionOverlay). Both walk
-    // up the parent chain, so marking the group covers everything inside it.
     textGroup->setProperty("textEditorStyleControl", true);
     auto *textForm = new QFormLayout(textGroup);
 
-    // These controls style two things: new text boxes (and the text box being
-    // edited), and the text of a reconstructed region while its editor is open.
     m_fontBox = new QComboBox;
     m_fontBox->addItems(AnnotationFonts::families());
     m_fontBox->setCurrentText(AnnotationFonts::families().first());
@@ -783,9 +775,6 @@ void MainWindow::setupToolsPane()
     m_fontBox->setProperty("textEditorStyleControl", true);
     m_fontBox->setToolTip("Font");
 
-    // While a reconstructed region is being edited, this box replaces the one above
-    // and offers every installed font. The text box tool keeps Helvetica/Times/Courier
-    // because a FreeText annotation can only name a standard PDF font.
     auto *reconFontBox = new QFontComboBox;
     reconFontBox->setEditable(false);
     reconFontBox->setFontFilters(QFontComboBox::ScalableFonts);
@@ -794,15 +783,10 @@ void MainWindow::setupToolsPane()
     reconFontBox->setProperty("textEditorStyleControl", true);
     reconFontBox->setToolTip("Font of the selected text");
 
-    // Open each drop-down list below its box. The default lays the list over the box
-    // with the current item on top, which for a long font list covered most of the pane.
     const QString dropDownStyle = QStringLiteral("QComboBox { combobox-popup: 0; }");
     m_fontBox->setStyleSheet(dropDownStyle);
     reconFontBox->setStyleSheet(dropDownStyle);
 
-    // Both boxes share one form row and only one is visible at a time. (A
-    // QStackedWidget here stretched the box to the height of the whole pane: a stacked
-    // layout ignores the size policy of what it holds.)
     auto *fontRow = new QVBoxLayout;
     fontRow->setContentsMargins(0, 0, 0, 0);
     fontRow->addWidget(m_fontBox);
@@ -841,7 +825,6 @@ void MainWindow::setupToolsPane()
         button->setToolButtonStyle(Qt::ToolButtonIconOnly);
         button->setIconSize(QSize(26, 26));
         button->setProperty("textEditorStyleControl", true);
-        // Same "pressed in" look the toolbar used for a checked button.
         button->setStyleSheet(QStringLiteral(
             "QToolButton:checked { border: 2px solid palette(highlight); border-radius: 4px; }"));
         styleRow->addWidget(button);
@@ -849,16 +832,108 @@ void MainWindow::setupToolsPane()
     styleRow->addStretch();
     textForm->addRow("Style:", styleRow);
 
+    auto *alignGroup = new QActionGroup(this);
+    alignGroup->setExclusive(true);
+    auto *alignRow = new QHBoxLayout;
+    alignRow->setContentsMargins(0, 0, 0, 0);
+    struct AlignChoice { Qt::AlignmentFlag flag; const char *tip; };
+    const AlignChoice alignChoices[] = {
+        { Qt::AlignLeft,    "Align left" },
+        { Qt::AlignHCenter, "Align center" },
+        { Qt::AlignRight,   "Align right" },
+        { Qt::AlignJustify, "Justify: lines that wrap are spread to the full width of the box. "
+                            "In text that was on the page, line breaks that only wrapped are "
+                            "re-flowed to the box width." },
+    };
+    for (const AlignChoice &choice : alignChoices) {
+        auto *action = new QAction(alignIcon(choice.flag), QString::fromLatin1(choice.tip), this);
+        action->setCheckable(true);
+        action->setData(int(choice.flag));
+        action->setToolTip(QString::fromLatin1(choice.tip));
+        alignGroup->addAction(action);
+
+        auto *button = new QToolButton;
+        button->setDefaultAction(action);
+        button->setToolButtonStyle(Qt::ToolButtonIconOnly);
+        button->setIconSize(QSize(26, 26));
+        button->setProperty("textEditorStyleControl", true);
+        button->setStyleSheet(QStringLiteral(
+            "QToolButton:checked { border: 2px solid palette(highlight); border-radius: 4px; }"));
+        alignRow->addWidget(button);
+    }
+    alignRow->addStretch();
+    alignGroup->actions().first()->setChecked(true);
+    textForm->addRow("Align:", alignRow);
+
+    const auto showAlignment = [alignGroup](Qt::AlignmentFlag alignment) {
+        const QList<QAction *> actions = alignGroup->actions();
+        for (QAction *action : actions) {
+            if (action->data().toInt() == int(alignment)) {
+                action->setChecked(true);
+                return;
+            }
+        }
+    };
+    const auto checkedAlignment = [alignGroup]() {
+        const QAction *action = alignGroup->checkedAction();
+        return action ? Qt::AlignmentFlag(action->data().toInt()) : Qt::AlignLeft;
+    };
+
     textPageLayout->addWidget(textGroup);
 
-    // Only visible in reconstruct mode: what to do with the edits.
+    auto *textBoxSection = new QGroupBox("Added text box");
+    auto *textBoxLayout = new QVBoxLayout(textBoxSection);
+    auto *textBoxHint = new QLabel(
+        "Click a text box you added to select it. Double-click it to edit its text.");
+    textBoxHint->setWordWrap(true);
+    textBoxLayout->addWidget(textBoxHint);
+    textBoxLayout->addWidget(actionButton(m_deleteTextAction, "Delete selected text box"));
+    textPageLayout->addWidget(textBoxSection);
+
     auto *reconstructSection = new QGroupBox("Reconstruct");
     auto *reconstructLayout = new QVBoxLayout(reconstructSection);
     auto *reconstructHint = new QLabel(
-        "Click a text region on the page to edit it. Edits wait until you apply them. "
-        "The text options above work while a region is open.");
+        "Click a text region on the page to edit it. Drag the square corners of its box to "
+        "resize it and the orange tab to move it; the red tab (or Delete text box) deletes "
+        "it. Edits wait until you apply them. The text options above work while a region is "
+        "open (in a text box you added, with nothing selected they style all of its text).");
     reconstructHint->setWordWrap(true);
     reconstructLayout->addWidget(reconstructHint);
+
+    auto *addNewTextAction = new QAction(QIcon(":/icons/addtext.png"), "Add new text", this);
+    addNewTextAction->setCheckable(true);
+    addNewTextAction->setToolTip(
+        "Drag a box on the page, then type. Once applied, the text is part of the page, "
+        "like the rest of the PDF.");
+    connect(addNewTextAction, &QAction::toggled, this,
+            [overlay](bool on) { overlay->setAddTextMode(on); });
+    connect(overlay, &ReconstructionOverlay::addTextModeChanged, this,
+            [addNewTextAction](bool on) {
+        const QSignalBlocker blocker(addNewTextAction);
+        addNewTextAction->setChecked(on);
+    });
+    auto *addNewTextButton = new QToolButton;
+    addNewTextButton->setDefaultAction(addNewTextAction);
+    addNewTextButton->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    addNewTextButton->setIconSize(QSize(24, 24));
+    addNewTextButton->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    addNewTextButton->setStyleSheet(QStringLiteral(
+        "QToolButton:checked { border: 2px solid palette(highlight); border-radius: 4px; }"));
+    reconstructLayout->addWidget(addNewTextButton);
+
+    auto *deleteTextBoxAction = new QAction(QIcon(":/icons/deletetext.png"),
+                                            "Delete text box", this);
+    deleteTextBoxAction->setEnabled(false);
+    deleteTextBoxAction->setToolTip(
+        "Delete the text box that is open. A box you added is removed; text that was already "
+        "on the page is removed when you apply (Undo takes it back). Also the red tab on the "
+        "box, or Alt+Delete while typing.");
+    connect(deleteTextBoxAction, &QAction::triggered, this,
+            [overlay]() { overlay->deleteEdit(); });
+    connect(overlay, &ReconstructionOverlay::editingChanged, this,
+            [deleteTextBoxAction](bool editing) { deleteTextBoxAction->setEnabled(editing); });
+    reconstructLayout->addWidget(actionButton(deleteTextBoxAction, "Delete text box"));
+
     auto *pendingLabel = new QLabel("No edits waiting.");
     reconstructLayout->addWidget(pendingLabel);
     reconstructLayout->addWidget(
@@ -870,7 +945,7 @@ void MainWindow::setupToolsPane()
     textPageLayout->addStretch();
     stack->addWidget(textPage);
 
-    // ---- page 2: drawing --------------------------------------------------------
+    // page 2: drawing
     auto *drawPage = new QWidget;
     auto *drawPageLayout = new QVBoxLayout(drawPage);
     auto *drawGroup = new QGroupBox("Drawing");
@@ -910,7 +985,7 @@ void MainWindow::setupToolsPane()
     drawPageLayout->addStretch();
     stack->addWidget(drawPage);
 
-    // ---- page 3: redaction ------------------------------------------------------
+    // page 3: redaction
     auto *redactionPage = new QWidget;
     auto *redactionPageLayout = new QVBoxLayout(redactionPage);
     auto *redactionGroup = new QGroupBox("Redaction");
@@ -945,17 +1020,15 @@ void MainWindow::setupToolsPane()
     redactionPageLayout->addWidget(redactionGroup);
     stack->addWidget(redactionPage);
 
-    // ---- page 4: image ----------------------------------------------------------
-    // Shown while an image (or an E-sign mark) is being placed, and while an added
-    // image is selected. The buttons are the actions that used to be on the Image toolbar.
+    // page 4: image
     auto *imagePage = new QWidget;
     auto *imagePageLayout = new QVBoxLayout(imagePage);
     auto *imageGroup = new QGroupBox("Image");
     auto *imageLayout = new QVBoxLayout(imageGroup);
 
     auto *imageHint = new QLabel(
-        "Drag the image to move it, or a corner to resize it. While placing: Enter places "
-        "it and Esc cancels.");
+        "Drag the image to move it, or a corner to resize it. Crop works on an image you "
+        "added earlier too. While placing: Enter places it and Esc cancels.");
     imageHint->setWordWrap(true);
     imageLayout->addWidget(imageHint);
 
@@ -965,7 +1038,6 @@ void MainWindow::setupToolsPane()
         button->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
         button->setIconSize(QSize(24, 24));
         button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-        // Crop stays "pressed in" while cropping.
         button->setStyleSheet(QStringLiteral(
             "QToolButton:checked { border: 2px solid palette(highlight); border-radius: 4px; }"));
         imageLayout->addWidget(button);
@@ -975,8 +1047,67 @@ void MainWindow::setupToolsPane()
     imagePageLayout->addStretch();
     stack->addWidget(imagePage);
 
-    // ---- the dock -------------------------------------------------------------------
-    // The pane sits in a scroll area so a short window can still reach everything.
+    // page 5: e-sign 
+    m_esignTypeAction = new QAction("Type a signature...", this);
+    m_esignTypeAction->setToolTip("Type your name as a signature");
+    connect(m_esignTypeAction, &QAction::triggered, this, &MainWindow::addTypedESignature);
+    m_esignDrawAction = new QAction("Draw a signature...", this);
+    m_esignDrawAction->setToolTip("Draw a signature with the mouse");
+    connect(m_esignDrawAction, &QAction::triggered, this, &MainWindow::drawESignature);
+    m_esignUploadAction = new QAction("Upload an image...", this);
+    m_esignUploadAction->setToolTip("Use a picture of your signature");
+    connect(m_esignUploadAction, &QAction::triggered, this, &MainWindow::uploadESignature);
+
+    auto *esignPage = new QWidget;
+    auto *esignPageLayout = new QVBoxLayout(esignPage);
+    auto *esignGroup = new QGroupBox("E-sign");
+    auto *esignLayout = new QVBoxLayout(esignGroup);
+
+    auto *esignHint = new QLabel(
+        "Click a saved signature to place it on the page. This is a visible mark, not a "
+        "certificate-based digital signature.");
+    esignHint->setWordWrap(true);
+    esignLayout->addWidget(esignHint);
+
+    esignLayout->addWidget(actionButton(m_esignTypeAction, "Type a signature..."));
+    esignLayout->addWidget(actionButton(m_esignDrawAction, "Draw a signature..."));
+    esignLayout->addWidget(actionButton(m_esignUploadAction, "Upload an image..."));
+
+    auto *savedLabel = new QLabel("Saved signatures (right-click one to rename or delete it):");
+    savedLabel->setWordWrap(true);
+    esignLayout->addWidget(savedLabel);
+
+    m_signatureList = new QListWidget;
+    m_signatureList->setViewMode(QListView::IconMode);
+    m_signatureList->setFlow(QListView::TopToBottom);
+    m_signatureList->setWrapping(false);
+    m_signatureList->setMovement(QListView::Static);
+    m_signatureList->setResizeMode(QListView::Adjust);
+    m_signatureList->setIconSize(QSize(200, 68));
+    m_signatureList->setSpacing(4);
+    m_signatureList->setUniformItemSizes(true);
+    m_signatureList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_signatureList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_signatureList->setMinimumHeight(150);
+    m_signatureList->setContextMenuPolicy(Qt::CustomContextMenu);
+    esignLayout->addWidget(m_signatureList, 1);
+
+    m_signatureEmptyLabel = new QLabel(
+        "No saved signatures yet. Make one with the buttons above and it is saved here for "
+        "next time.");
+    m_signatureEmptyLabel->setWordWrap(true);
+    m_signatureEmptyLabel->setEnabled(false);
+    esignLayout->addWidget(m_signatureEmptyLabel);
+
+    connect(m_signatureList, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
+        useSavedESignature(item->data(Qt::UserRole).toString());
+    });
+    connect(m_signatureList, &QWidget::customContextMenuRequested,
+            this, &MainWindow::showESignatureMenu);
+
+    esignPageLayout->addWidget(esignGroup);
+    stack->addWidget(esignPage);
+
     auto *scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
@@ -992,68 +1123,70 @@ void MainWindow::setupToolsPane()
     addDockWidget(Qt::RightDockWidgetArea, m_toolsDock);
     resizeDocks({ m_toolsDock }, { 260 }, Qt::Horizontal);
 
-    // Show the dock's open/closed toggle in the View menu, after Pages and Bookmarks.
     if (m_viewMenu) {
         const QList<QAction *> viewActions = m_viewMenu->actions();
         m_viewMenu->insertAction(viewActions.value(2), m_toolsDock->toggleViewAction());
     }
 
-    // ---- which page is showing --------------------------------------------------------
-    // Reads the state of the tools and picks the page. Runs whenever a tool is
-    // switched on or off, a text editor opens or closes, or the marked areas change.
-    const auto updatePane = [this, stack, overlay, textGroup, reconstructSection]() {
+    const auto updatePane = [this, stack, overlay, textGroup, textBoxSection,
+                             reconstructSection]() {
         const bool reconstructing = m_reconstructAction->isChecked();
 
         int page = kToolsPageNone;
-        if (reconstructing || m_addTextAction->isChecked() || m_view->isTextEditorOpen())
+        if (reconstructing || m_addTextAction->isChecked() || m_view->isTextEditorOpen()
+            || m_view->hasSelectedTextAnnotation())
             page = kToolsPageText;
         else if (m_drawAction->isChecked())
             page = kToolsPageDraw;
         else if (m_view->hasActiveImagePlacement() || m_view->hasSelectedImageStamp())
             page = kToolsPageImage;
+        else if (m_esignAction->isChecked())
+            page = kToolsPageESign;
         else if (m_redactAction->isChecked() || m_view->hasRedactionAreas())
             page = kToolsPageRedaction;
 
         stack->setCurrentIndex(page);
         reconstructSection->setVisible(reconstructing);
+        textBoxSection->setVisible(!reconstructing);
 
-        // In reconstruct mode these controls style the text of the region being
-        // edited, so they only mean something while an editor is open.
-        textGroup->setEnabled(!reconstructing || overlay->isEditing());
+        const bool typing = reconstructing
+                                ? overlay->isEditing()
+                                : (m_addTextAction->isChecked() || m_view->isTextEditorOpen());
+        textGroup->setEnabled(typing);
     };
 
     for (QAction *action : { m_addTextAction, m_drawAction, m_redactAction,
-                             m_reconstructAction }) {
+                             m_reconstructAction, m_esignAction }) {
         connect(action, &QAction::toggled, this, [updatePane](bool) { updatePane(); });
     }
-    // The redaction tool can switch itself off (Esc) with its action's signals
-    // blocked, so it is watched from the view as well.
+    connect(m_esignAction, &QAction::toggled, this, [this](bool on) {
+        if (on)
+            refreshESignatureList();
+    });
     connect(m_view, &PageView::redactionToolChanged, this,
             [updatePane](bool) { updatePane(); });
-    // An image starts or stops being placed, or an added image is selected or not.
     connect(m_view, &PageView::imagePlacementStateChanged, this,
             [updatePane](bool, bool) { updatePane(); });
     connect(m_view, &PageView::imageStampSelectionChanged, this,
             [updatePane](bool) { updatePane(); });
-    // Also emitted when a text editor opens or closes.
+    connect(m_view, &PageView::textAnnotationSelectionChanged, this,
+            [updatePane](bool) { updatePane(); });
     connect(m_view, &PageView::pendingChangesChanged, this, [updatePane]() { updatePane(); });
     connect(overlay, &ReconstructionOverlay::editingChanged, this,
             [updatePane](bool) { updatePane(); });
 
-    // ---- text controls (the handlers the text toolbar used to have) ---------------------
-    // Text box style: read all controls into one style and hand it to the view.
-    auto applyTextBoxStyle = [this]() {
+    auto applyTextBoxStyle = [this, checkedAlignment]() {
         m_textBoxStyle.family = m_fontBox->currentText();
         m_textBoxStyle.sizePoints = m_fontSizeBox->value();
         m_textBoxStyle.color = m_textColorButton->color();
         m_textBoxStyle.bold = m_boldAction->isChecked();
         m_textBoxStyle.italic = m_italicAction->isChecked();
         m_textBoxStyle.underline = m_underlineAction->isChecked();
+        m_textBoxStyle.alignment = checkedAlignment();
         m_view->setTextStyle(m_textBoxStyle);
     };
 
-    // Show the text box style in the controls without triggering their handlers.
-    auto showTextBoxStyle = [this]() {
+    auto showTextBoxStyle = [this, showAlignment]() {
         const QSignalBlocker fontBlocker(m_fontBox);
         const QSignalBlocker sizeBlocker(m_fontSizeBox);
         const QSignalBlocker colorBlocker(m_textColorButton);
@@ -1066,19 +1199,12 @@ void MainWindow::setupToolsPane()
         m_boldAction->setChecked(m_textBoxStyle.bold);
         m_italicAction->setChecked(m_textBoxStyle.italic);
         m_underlineAction->setChecked(m_textBoxStyle.underline);
+        showAlignment(m_textBoxStyle.alignment);
     };
 
-    // A change goes to the open reconstruct editor if there is one (and only
-    // that one property, so a mixed selection keeps its other styles); otherwise
-    // it is the style for text boxes. The font is the exception: the text box font
-    // box (Helvetica/Times/Courier) is hidden while a reconstruct editor is open,
-    // and the all-fonts box takes its place.
     connect(m_fontBox, &QComboBox::currentTextChanged, this,
             [applyTextBoxStyle](const QString &) { applyTextBoxStyle(); });
 
-    // textActivated fires only for the user's own choice, so picking the font that
-    // is already shown still applies it (the PDF's font may not be installed, and
-    // the editor then shows a substitute).
     connect(reconFontBox, &QComboBox::textActivated, this,
             [overlay](const QString &family) {
         if (overlay->isEditing())
@@ -1116,11 +1242,16 @@ void MainWindow::setupToolsPane()
         else
             applyTextBoxStyle();
     });
+    connect(alignGroup, &QActionGroup::triggered, this,
+            [overlay, applyTextBoxStyle, checkedAlignment](QAction *) {
+        if (overlay->isEditing())
+            overlay->setAlignment(checkedAlignment());
+        else
+            applyTextBoxStyle();
+    });
 
-    // The reconstruct editor tells the pane what the text at the cursor looks like,
-    // and when it opens or closes.
     connect(overlay, &ReconstructionOverlay::formatChanged, this,
-            [this, reconFontBox](const ReconstructionFormat &format) {
+            [this, reconFontBox, showAlignment](const ReconstructionFormat &format) {
         const QSignalBlocker sizeBlocker(m_fontSizeBox);
         const QSignalBlocker colorBlocker(m_textColorButton);
         const QSignalBlocker boldBlocker(m_boldAction);
@@ -1133,13 +1264,14 @@ void MainWindow::setupToolsPane()
         m_boldAction->setChecked(format.bold);
         m_italicAction->setChecked(format.italic);
         m_underlineAction->setChecked(format.underlined);
+        showAlignment(format.alignment);
     });
     connect(overlay, &ReconstructionOverlay::editingChanged, this,
             [this, reconFontBox, showTextBoxStyle](bool editing) {
         m_fontBox->setVisible(!editing);
         reconFontBox->setVisible(editing);
         if (!editing)
-            showTextBoxStyle(); // back to the style for new text boxes
+            showTextBoxStyle();
     });
     connect(overlay, &ReconstructionOverlay::pendingChanged, this,
             [pendingLabel](int count) {
@@ -1148,9 +1280,8 @@ void MainWindow::setupToolsPane()
                                   : QStringLiteral("No edits waiting."));
     });
 
-    // Editing an existing text box shows that box's style.
     connect(m_view, &PageView::textAnnotationEditingStyleChanged, this,
-            [this](const PageView::TextStyle &style) {
+            [this, showAlignment](const PageView::TextStyle &style) {
         const QSignalBlocker fontBlocker(m_fontBox);
         const QSignalBlocker sizeBlocker(m_fontSizeBox);
         const QSignalBlocker colorBlocker(m_textColorButton);
@@ -1163,9 +1294,9 @@ void MainWindow::setupToolsPane()
         m_boldAction->setChecked(style.bold);
         m_italicAction->setChecked(style.italic);
         m_underlineAction->setChecked(style.underline);
+        showAlignment(style.alignment);
     });
 
-    // ---- drawing controls (the handlers the draw toolbar used to have) ------------------
     auto applyDrawStyle = [this, size, opacity, colorButton]() {
         PageView::DrawStyle style;
         style.color = colorButton->color();
@@ -1202,9 +1333,6 @@ void MainWindow::setupToolsPane()
                 applyDrawStyle();
             });
 
-    // ---- the list of marked redaction areas ---------------------------------------------
-    // Rebuilt from the view every time the areas change. Nothing is selected after a
-    // rebuild, so the view's highlight is cleared with it.
     const auto refreshRedactionList = [this, redactionList, deleteAreaButton,
                                        clearAreasButton]() {
         const QVector<PdfEditor::RedactionArea> areas = m_view->redactionAreas();
@@ -1229,7 +1357,6 @@ void MainWindow::setupToolsPane()
         updatePane();
     });
 
-    // Selecting an area highlights it on the page and scrolls to it.
     connect(redactionList, &QListWidget::currentRowChanged, this,
             [this, deleteAreaButton](int row) {
         deleteAreaButton->setEnabled(row >= 0);
@@ -1245,9 +1372,9 @@ void MainWindow::setupToolsPane()
     connect(clearAreasButton, &QPushButton::clicked,
             m_view, &PageView::clearRedactionAreas);
 
-    // ---- start state ----------------------------------------------------------------------
     applyTextBoxStyle();
     applyDrawStyle();
     refreshRedactionList();
+    refreshESignatureList();
     updatePane();
 }

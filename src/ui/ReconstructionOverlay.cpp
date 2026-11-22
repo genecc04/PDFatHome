@@ -19,6 +19,7 @@
 #include <QTextDocument>
 #include <QTextEdit>
 #include <QTextFragment>
+#include <QTextLayout>
 #include <QTextOption>
 #include <QTimer>
 #include <QWidget>
@@ -69,11 +70,115 @@ protected:
     }
 };
 
+class ResizeHandle : public QWidget
+{
+public:
+    ResizeHandle(QWidget *parent, int corner)
+        : QWidget(parent)
+    {
+        setFixedSize(10, 10);
+        setCursor((corner == 0 || corner == 3) ? Qt::SizeFDiagCursor : Qt::SizeBDiagCursor);
+        setToolTip(QStringLiteral("Drag to resize this text box"));
+        setProperty("textEditorStyleControl", true);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.fillRect(rect(), Qt::white);
+        painter.setPen(QPen(QColor(224, 138, 0), 1));
+        painter.drawRect(rect().adjusted(0, 0, -1, -1));
+    }
+};
+
+class DeleteHandle : public QWidget
+{
+public:
+    explicit DeleteHandle(QWidget *parent)
+        : QWidget(parent)
+    {
+        setFixedSize(22, 14);
+        setCursor(Qt::PointingHandCursor);
+        setToolTip(QStringLiteral("Delete this text box (Alt+Delete)"));
+        setProperty("textEditorStyleControl", true);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.fillRect(rect(), QColor(200, 40, 40));
+        painter.setPen(QPen(Qt::white, 1.8, Qt::SolidLine, Qt::RoundCap));
+        const QPointF center = QRectF(rect()).center();
+        painter.drawLine(QPointF(center.x() - 3.5, center.y() - 3.5),
+                         QPointF(center.x() + 3.5, center.y() + 3.5));
+        painter.drawLine(QPointF(center.x() - 3.5, center.y() + 3.5),
+                         QPointF(center.x() + 3.5, center.y() - 3.5));
+    }
+};
+
+Reconstruction::TextRun newTextRun()
+{
+    Reconstruction::TextRun run;
+    run.fontSize = 12.0f;
+    run.family = Reconstruction::FontFamily::Sans;
+    run.color = QColor(Qt::black);
+    return run;
+}
+
+Reconstruction::TextRun styleFromFormat(const QTextCharFormat &format, double pixelsPerPoint,
+                                        const Reconstruction::TextRun &fallback)
+{
+    Reconstruction::TextRun run = fallback;
+    run.text.clear();
+    run.fontName = format.property(Reconstruction::kFontNameProperty).toString();
+
+    double size = format.property(Reconstruction::kFontSizeProperty).toDouble();
+    if (size <= 0.0 && pixelsPerPoint > 0.0 && format.font().pixelSize() > 0)
+        size = format.font().pixelSize() / pixelsPerPoint;
+    if (size > 0.0)
+        run.fontSize = float(size);
+
+    const int kind = format.property(Reconstruction::kFontFamilyProperty).toInt();
+    if (kind > int(Reconstruction::FontFamily::Unknown)
+        && kind <= int(Reconstruction::FontFamily::Mono))
+        run.family = Reconstruction::FontFamily(kind);
+
+    run.bold = format.font().bold();
+    run.italic = format.font().italic();
+    run.underlined = format.fontUnderline();
+    if (format.foreground().style() != Qt::NoBrush)
+        run.color = format.foreground().color();
+    return run;
+}
+
+bool isDeletion(const ReconstructionEdit &edit)
+{
+    return !edit.isNew && edit.paragraph.text.trimmed().isEmpty();
+}
+
+void fitNewTextMetrics(Reconstruction::TextParagraph &paragraph, double fallbackSize)
+{
+    double biggest = 0.0;
+    for (const Reconstruction::TextRun &run : std::as_const(paragraph.runs))
+        biggest = qMax(biggest, double(run.fontSize));
+    if (biggest <= 0.0)
+        biggest = fallbackSize;
+    if (biggest <= 0.0)
+        return;
+
+    paragraph.fontSize = float(biggest);
+    paragraph.lineSpacing = biggest * 1.2;
+}
+
 }
 
 ReconstructionOverlay::ReconstructionOverlay(PageView *view)
     : QObject(view)
     , m_view(view)
+    , m_newTextStyle(newTextRun())
 {
 }
 
@@ -82,8 +187,10 @@ void ReconstructionOverlay::setActive(bool active)
     if (m_active == active)
         return;
 
-    if (!active)
+    if (!active) {
         flush();
+        setAddTextMode(false);
+    }
 
     m_active = active;
     m_result.reset();
@@ -111,6 +218,7 @@ void ReconstructionOverlay::setResult(
 void ReconstructionOverlay::reset()
 {
     cancelEdit();
+    setAddTextMode(false);
     m_result.reset();
     m_page = -1;
     m_hover = -1;
@@ -122,17 +230,25 @@ void ReconstructionOverlay::reset()
     m_view->viewport()->update();
 }
 
+// drawing and mouse
+
 void ReconstructionOverlay::paint(QPainter &painter, int page, const QRect &target)
 {
     if (!m_active)
         return;
 
-    if (m_editor && m_editPage == page && !m_offset.isNull()) {
+    if (m_editor && m_editPage == page && !m_newText) {
         painter.fillRect(m_view->pageToViewport(target, m_edited.bounds),
                          m_edited.backgroundColor);
     }
 
     drawPending(painter, page, target);
+
+    if (m_addDragging && m_addPage == page) {
+        painter.setPen(QPen(QColor(224, 138, 0), 1.5, Qt::DashLine));
+        painter.setBrush(QColor(224, 138, 0, 35));
+        painter.drawRect(m_view->pageToViewport(target, QRectF(m_addStart, m_addEnd).normalized()));
+    }
 
     if (!m_result || m_page != page)
         return;
@@ -168,8 +284,12 @@ void ReconstructionOverlay::drawPending(QPainter &painter, int page, const QRect
         if (m_editor && m_editPage == page && sameBounds(edit.paragraph.bounds, m_edited.bounds))
             continue;
 
-        painter.fillRect(m_view->pageToViewport(target, edit.paragraph.bounds),
-                         edit.paragraph.backgroundColor);
+        if (!edit.isNew)
+            painter.fillRect(m_view->pageToViewport(target, edit.paragraph.bounds),
+                             edit.paragraph.backgroundColor);
+
+        if (isDeletion(edit))
+            continue;
 
         QTextDocument *document = previewDocument(pending, scale);
         const QRectF region = m_view->pageToViewport(target, edit.region);
@@ -219,6 +339,15 @@ bool ReconstructionOverlay::handleMousePress(QMouseEvent *event)
 
     const QPointF point = m_view->pagePointFor(page, pos);
 
+    if (m_addMode) {
+        m_addPage = page;
+        m_addStart = point;
+        m_addEnd = point;
+        m_addDragging = true;
+        m_view->viewport()->update();
+        return true;
+    }
+
     const int pendingIndex = pendingIndexAt(page, point);
     if (pendingIndex >= 0) {
         startEditPending(pendingIndex);
@@ -238,6 +367,12 @@ bool ReconstructionOverlay::handleMouseMove(const QPoint &pos)
     if (!m_active)
         return false;
 
+    if (m_addDragging) {
+        m_addEnd = m_view->pagePointFor(m_addPage, pos);
+        m_view->viewport()->update();
+        return true;
+    }
+
     int hover = -1;
     int hoverPending = -1;
     if (!m_editor) {
@@ -255,16 +390,60 @@ bool ReconstructionOverlay::handleMouseMove(const QPoint &pos)
         m_hoverPending = hoverPending;
         m_view->viewport()->update();
     }
-    if (!m_editor)
-        m_view->viewport()->setCursor((hover >= 0 || hoverPending >= 0) ? Qt::IBeamCursor
-                                                                         : Qt::ArrowCursor);
+    if (!m_editor) {
+        m_view->viewport()->setCursor(m_addMode ? Qt::CrossCursor
+                                      : (hover >= 0 || hoverPending >= 0) ? Qt::IBeamCursor
+                                                                           : Qt::ArrowCursor);
+    }
     return true;
+}
+
+bool ReconstructionOverlay::handleMouseRelease(QMouseEvent *event)
+{
+    if (!m_active || !m_addDragging || event->button() != Qt::LeftButton)
+        return false;
+
+    m_addDragging = false;
+    const int page = m_addPage;
+    const double scale = m_view->m_scale;
+    const QSizeF pageSize = page >= 0 && page < m_view->m_pageSizes.size()
+                                ? m_view->m_pageSizes.at(page) : QSizeF();
+
+    QRectF rect = QRectF(m_addStart, m_addEnd).normalized();
+    if (scale > 0.0 && (rect.width() * scale < 12.0 || rect.height() * scale < 12.0))
+        rect = QRectF(m_addStart, QSizeF(200.0, 40.0));
+
+    if (pageSize.width() > 0.0 && pageSize.height() > 0.0) {
+        rect.setWidth(qMin(rect.width(), pageSize.width()));
+        rect.setHeight(qMin(rect.height(), pageSize.height()));
+        rect.moveLeft(qBound(0.0, rect.left(), pageSize.width() - rect.width()));
+        rect.moveTop(qBound(0.0, rect.top(), pageSize.height() - rect.height()));
+    }
+
+    setAddTextMode(false);
+    startNewText(page, rect);
+    return true;
+}
+
+void ReconstructionOverlay::setAddTextMode(bool on)
+{
+    if (on && !m_active)
+        return;
+    m_addDragging = false;
+    if (m_addMode == on)
+        return;
+
+    m_addMode = on;
+    m_view->viewport()->setCursor(on ? Qt::CrossCursor : Qt::ArrowCursor);
+    m_view->viewport()->update();
+    emit addTextModeChanged(on);
 }
 
 int ReconstructionOverlay::pendingIndexAt(int page, const QPointF &pagePoint) const
 {
     for (int i = int(m_pending.size()) - 1; i >= 0; --i) {
-        if (m_pending.at(i).edit.page == page && m_pending.at(i).box.contains(pagePoint))
+        if (m_pending.at(i).edit.page == page && m_pending.at(i).box.contains(pagePoint)
+            && !isDeletion(m_pending.at(i).edit))
             return i;
     }
     return -1;
@@ -300,6 +479,8 @@ bool ReconstructionOverlay::isStaged(int page, const QRectF &originalBounds) con
     return false;
 }
 
+// editor box
+
 void ReconstructionOverlay::startEdit(int index)
 {
     if (m_editor || !m_result || index < 0 || index >= int(m_result->paragraphs.size()))
@@ -311,6 +492,8 @@ void ReconstructionOverlay::startEdit(int index)
     m_region = Reconstruction::editRegion(*m_result, m_edited);
     m_baseline = Reconstruction::paragraphFirstBaselineY(*m_result, m_edited);
     m_offset = QPointF();
+    m_newText = false;
+    m_boxHeight = m_edited.bounds.height();
     openEditor();
 }
 
@@ -327,6 +510,36 @@ void ReconstructionOverlay::startEditPending(int pendingIndex)
     m_offset = pending.offset;
     m_region = pending.edit.region.translated(-pending.offset);
     m_baseline = pending.edit.firstBaselineY - pending.offset.y();
+    m_newText = pending.edit.isNew;
+    m_boxHeight = pending.boxHeight > 0.0 ? pending.boxHeight : m_edited.bounds.height();
+    openEditor();
+}
+
+void ReconstructionOverlay::startNewText(int page, const QRectF &rect)
+{
+    if (m_editor || rect.isEmpty())
+        return;
+
+    Reconstruction::TextParagraph paragraph;
+    paragraph.bounds = rect;
+    paragraph.fontName = m_newTextStyle.fontName;
+    paragraph.fontSize = m_newTextStyle.fontSize;
+    paragraph.lineSpacing = double(m_newTextStyle.fontSize) * 1.2;
+    paragraph.family = m_newTextStyle.family;
+    paragraph.bold = m_newTextStyle.bold;
+    paragraph.italic = m_newTextStyle.italic;
+    paragraph.alignment = m_newTextAlignment;
+    paragraph.textColor = m_newTextStyle.color;
+    paragraph.backgroundColor = QColor(Qt::white);
+
+    m_edited = paragraph;
+    m_editPage = page;
+    m_editSource = int(Reconstruction::PageSource::TextLayer);
+    m_region = rect;
+    m_baseline = rect.top() + m_newTextStyle.fontSize;
+    m_offset = QPointF();
+    m_newText = true;
+    m_boxHeight = rect.height();
     openEditor();
 }
 
@@ -336,7 +549,10 @@ void ReconstructionOverlay::openEditor()
     m_hover = -1;
     m_hoverPending = -1;
     m_startOffset = m_offset;
+    m_startRegion = m_region;
+    m_startBoxHeight = m_boxHeight;
     m_moving = false;
+    m_resizeCorner = -1;
 
     m_editor = new QTextEdit(m_view->viewport());
     m_editor->setFrameStyle(QFrame::NoFrame);
@@ -346,7 +562,8 @@ void ReconstructionOverlay::openEditor()
     m_editor->setAcceptRichText(false);
     m_editor->setStyleSheet(QStringLiteral(
         "QTextEdit { background: %1; border: 1px dashed #e08a00; padding: 0px; }")
-        .arg(m_edited.backgroundColor.name()));
+        .arg(m_newText ? QStringLiteral("rgba(255,255,255,215)")
+                       : m_edited.backgroundColor.name()));
     m_editor->installEventFilter(this);
     connect(m_editor, &QTextEdit::textChanged, this, [this]() { fitEditorHeight(); });
     connect(m_editor, &QTextEdit::currentCharFormatChanged, this, [this]() { emitFormat(); });
@@ -354,9 +571,20 @@ void ReconstructionOverlay::openEditor()
     m_handle = new MoveHandle(m_view->viewport());
     m_handle->installEventFilter(this);
 
+    m_deleteHandle = new DeleteHandle(m_view->viewport());
+    m_deleteHandle->installEventFilter(this);
+
+    for (int corner = 0; corner < 4; ++corner) {
+        m_resizeHandles[corner] = new ResizeHandle(m_view->viewport(), corner);
+        m_resizeHandles[corner]->installEventFilter(this);
+    }
+
     m_editor->show();
     layoutEditor();
     m_handle->show();
+    m_deleteHandle->show();
+    for (QWidget *handle : m_resizeHandles)
+        handle->show();
     m_editor->setFocus();
     m_editor->moveCursor(QTextCursor::End);
     emit editingChanged(true);
@@ -376,6 +604,8 @@ void ReconstructionOverlay::rebuildEditorDocument(double scale)
     if (hasText) {
         m_edited.runs = Reconstruction::runsFromDocument(old, m_editScale);
         m_edited.text = Reconstruction::joinRuns(m_edited.runs);
+        if (m_newText)
+            fitNewTextMetrics(m_edited, m_newTextStyle.fontSize);
         cursorPosition = m_editor->textCursor().position();
         modified = old->isModified();
     }
@@ -396,6 +626,8 @@ void ReconstructionOverlay::rebuildEditorDocument(double scale)
     m_editor->setTextCursor(cursor);
     created->setModified(modified);
 
+    applyNewTextStyle(scale);
+
     m_editScale = scale;
 }
 
@@ -408,6 +640,10 @@ void ReconstructionOverlay::layoutEditor()
     if (!qFuzzyCompare(scale, m_editScale))
         rebuildEditorDocument(scale);
 
+    if (m_newText)
+        m_baseline = m_region.top()
+                     + Reconstruction::firstBaselineOffset(m_editor->document()) / scale;
+
     const QRect pageRect = m_view->pageRectInViewport(m_editPage);
     const QRectF region(pageRect.x() + (m_region.x() + m_offset.x()) * scale,
                         pageRect.y() + (m_region.y() + m_offset.y()) * scale,
@@ -416,7 +652,7 @@ void ReconstructionOverlay::layoutEditor()
                      pageRect.y() + (m_edited.bounds.y() + m_offset.y()) * scale,
                      m_edited.bounds.width() * scale, m_edited.bounds.height() * scale);
 
-    m_minHeight = qMax(int(box.height()), 20) + 2;
+    m_minHeight = qMax(int(m_boxHeight * scale), 20) + 2;
     m_editor->setGeometry(int(region.x()) - 1, int(box.y()) - 1,
                           qRound(region.width()) + 2, m_minHeight);
 
@@ -438,7 +674,9 @@ void ReconstructionOverlay::moveEditorTo(const QPointF &offset)
     const QSizeF pageSize = m_editPage >= 0 && m_editPage < m_view->m_pageSizes.size()
                                 ? m_view->m_pageSizes.at(m_editPage) : QSizeF();
     if (pageSize.width() > 0.0 && pageSize.height() > 0.0) {
-        const QRectF &bounds = m_edited.bounds;
+        const QRectF bounds = m_newText
+            ? QRectF(m_region.left(), m_edited.bounds.top(), m_region.width(), m_boxHeight)
+            : m_edited.bounds;
         const double minX = -bounds.left();
         const double minY = -bounds.top();
         clamped.setX(qBound(minX, offset.x(), qMax(minX, pageSize.width() - bounds.right())));
@@ -457,11 +695,83 @@ void ReconstructionOverlay::moveEditorTo(const QPointF &offset)
 
 void ReconstructionOverlay::positionHandle()
 {
-    if (!m_handle || !m_editor)
+    if (!m_editor)
         return;
 
-    m_handle->move(m_editor->x(), qMax(0, m_editor->y() - m_handle->height()));
-    m_handle->raise();
+    const QRect box = m_editor->geometry();
+
+    const QPoint corners[4] = { box.topLeft(), box.topRight(), box.bottomLeft(),
+                                box.bottomRight() };
+    for (int corner = 0; corner < 4; ++corner) {
+        if (!m_resizeHandles[corner])
+            continue;
+        m_resizeHandles[corner]->move(corners[corner] - QPoint(5, 5));
+        m_resizeHandles[corner]->raise();
+    }
+
+    if (m_handle) {
+        m_handle->move(box.x() + (box.width() - m_handle->width()) / 2,
+                       qMax(0, box.y() - m_handle->height()));
+        m_handle->raise();
+    }
+
+    if (m_deleteHandle) {
+        const int x = m_handle ? m_handle->x() + m_handle->width() + 3
+                               : box.x() + (box.width() - m_deleteHandle->width()) / 2;
+        m_deleteHandle->move(x, qMax(0, box.y() - m_deleteHandle->height()));
+        m_deleteHandle->raise();
+    }
+}
+
+void ReconstructionOverlay::resizeEditorTo(int corner, const QPointF &delta)
+{
+    if (!m_editor || m_editScale <= 0.0)
+        return;
+
+    constexpr double kMinWidth = 40.0;
+    const bool leftSide = (corner == 0 || corner == 2);
+    const bool topSide = (corner == 0 || corner == 1);
+    const QSizeF pageSize = m_editPage >= 0 && m_editPage < m_view->m_pageSizes.size()
+                                ? m_view->m_pageSizes.at(m_editPage) : QSizeF();
+
+    double left = m_resizeStartRegion.left();
+    double width = m_resizeStartRegion.width();
+    if (leftSide) {
+        double newLeft = qMin(left + delta.x(), left + width - kMinWidth);
+        if (pageSize.width() > 0.0)
+            newLeft = qMax(newLeft, -m_resizeStartOffset.x());
+        width += left - newLeft;
+        left = newLeft;
+    } else {
+        double newRight = qMax(left + width + delta.x(), left + kMinWidth);
+        if (pageSize.width() > 0.0)
+            newRight = qMin(newRight, pageSize.width() - m_resizeStartOffset.x());
+        width = newRight - left;
+    }
+
+    const double minHeight = qMax(10.0, m_editor->document()->size().height() / m_editScale);
+    double height = m_resizeStartHeight;
+    QPointF offset = m_resizeStartOffset;
+    if (topSide) {
+        const double newHeight = qMax(minHeight, height - delta.y());
+        double newOffsetY = offset.y() + (height - newHeight);
+        newOffsetY = qMax(newOffsetY, -m_edited.bounds.top());
+        height = qMax(minHeight, height - (newOffsetY - offset.y()));
+        offset.setY(newOffsetY);
+    } else {
+        height = qMax(minHeight, height + delta.y());
+        if (pageSize.height() > 0.0)
+            height = qMax(minHeight, qMin(height, pageSize.height()
+                                                      - (m_edited.bounds.top() + offset.y())));
+    }
+    if (qAbs(offset.y()) < 0.01)
+        offset.setY(0.0);
+
+    m_region = QRectF(left, m_region.top(), width, m_region.height());
+    m_boxHeight = height;
+    m_offset = offset;
+    layoutEditor();
+    m_view->viewport()->update();
 }
 
 void ReconstructionOverlay::fitEditorHeight()
@@ -470,6 +780,7 @@ void ReconstructionOverlay::fitEditorHeight()
         return;
     const int wanted = int(m_editor->document()->size().height()) + 2;
     m_editor->setFixedHeight(qMax(m_minHeight, wanted));
+    positionHandle();
 }
 
 void ReconstructionOverlay::reposition()
@@ -480,8 +791,15 @@ void ReconstructionOverlay::reposition()
 
 bool ReconstructionOverlay::hasPendingEdit() const
 {
-    return !m_pending.isEmpty()
-           || (m_editor && (m_editor->document()->isModified() || m_offset != m_startOffset));
+    return !m_pending.isEmpty() || editorChanged();
+}
+
+bool ReconstructionOverlay::editorChanged() const
+{
+    return m_editor
+           && (m_editor->document()->isModified() || m_offset != m_startOffset
+               || m_region != m_startRegion
+               || !qFuzzyCompare(m_boxHeight + 1.0, m_startBoxHeight + 1.0));
 }
 
 void ReconstructionOverlay::closeEditor()
@@ -493,10 +811,24 @@ void ReconstructionOverlay::closeEditor()
     m_editor = nullptr;
     m_offset = QPointF();
     m_moving = false;
+    m_resizeCorner = -1;
+    m_newText = false;
+    for (QWidget *&handle : m_resizeHandles) {
+        if (handle) {
+            handle->hide();
+            handle->deleteLater();
+            handle = nullptr;
+        }
+    }
     if (m_handle) {
         m_handle->hide();
         m_handle->deleteLater();
         m_handle = nullptr;
+    }
+    if (m_deleteHandle) {
+        m_deleteHandle->hide();
+        m_deleteHandle->deleteLater();
+        m_deleteHandle = nullptr;
     }
     editor->hide();
     editor->deleteLater();
@@ -515,7 +847,7 @@ void ReconstructionOverlay::commitEdit()
     if (!m_editor)
         return;
 
-    const bool changed = m_editor->document()->isModified() || m_offset != m_startOffset;
+    const bool changed = editorChanged();
 
     PendingReconstructionEdit pending;
     ReconstructionEdit &edit = pending.edit;
@@ -523,13 +855,26 @@ void ReconstructionOverlay::commitEdit()
     edit.paragraph = m_edited;
     edit.paragraph.runs = Reconstruction::runsFromDocument(m_editor->document(), m_editScale);
     edit.paragraph.text = Reconstruction::joinRuns(edit.paragraph.runs);
+    if (m_newText) {
+        fitNewTextMetrics(edit.paragraph, m_newTextStyle.fontSize);
+        if (m_editScale > 0.0)
+            m_baseline = m_region.top()
+                         + Reconstruction::firstBaselineOffset(m_editor->document()) / m_editScale;
+    }
     edit.region = m_region.translated(m_offset);
     edit.firstBaselineY = m_baseline + m_offset.y();
     edit.fromTextLayer = (m_editSource == int(Reconstruction::PageSource::TextLayer));
+    edit.isNew = m_newText;
     pending.offset = m_offset;
+    pending.boxHeight = m_boxHeight;
     pending.box = editorBoxInPagePoints();
 
     closeEditor();
+
+    if (pending.edit.isNew && pending.edit.paragraph.text.trimmed().isEmpty()) {
+        removePending(pending.edit.page, pending.edit.paragraph.bounds);
+        return;
+    }
 
     if (changed)
         stage(std::move(pending));
@@ -607,6 +952,8 @@ void ReconstructionOverlay::flush()
         emit applyRequested();
 }
 
+// formatting
+
 void ReconstructionOverlay::toggleFormat(int which)
 {
     if (!m_editor)
@@ -623,8 +970,105 @@ void ReconstructionOverlay::toggleFormat(int which)
 
 void ReconstructionOverlay::applyFormat(const QTextCharFormat &change)
 {
-    if (m_editor)
-        m_editor->mergeCurrentCharFormat(change);
+    if (!m_editor)
+        return;
+
+    const bool wholeBox = m_newText && !m_editor->textCursor().hasSelection();
+    if (wholeBox) {
+        QTextDocument *document = m_editor->document();
+        const bool wasEmpty = document->isEmpty();
+        const bool modified = document->isModified();
+
+        QTextCursor first(document);
+        first.mergeBlockCharFormat(change);
+
+        if (!wasEmpty) {
+            QTextCursor all(document);
+            all.select(QTextCursor::Document);
+            all.mergeCharFormat(change);
+        } else {
+            document->setModified(modified);
+        }
+    }
+
+    m_editor->mergeCurrentCharFormat(change);
+
+    if (wholeBox)
+        rememberNewTextStyle();
+}
+
+void ReconstructionOverlay::applyNewTextStyle(double scale)
+{
+    if (!m_editor || !m_newText || scale <= 0.0)
+        return;
+
+    QTextDocument *document = m_editor->document();
+    if (!document->isEmpty())
+        return;
+
+    const QTextCharFormat format = Reconstruction::charFormat(m_newTextStyle, scale);
+    const bool modified = document->isModified();
+
+    QTextCursor first(document);
+    first.setBlockCharFormat(format);
+    document->setModified(modified);
+
+    m_editor->setCurrentCharFormat(format);
+}
+
+void ReconstructionOverlay::rememberNewTextStyle()
+{
+    if (!m_editor || !m_newText || m_editScale <= 0.0)
+        return;
+
+    m_newTextStyle = styleFromFormat(m_editor->currentCharFormat(), m_editScale, m_newTextStyle);
+}
+
+void ReconstructionOverlay::removePending(int page, const QRectF &originalBounds)
+{
+    for (int i = 0; i < int(m_pending.size()); ++i) {
+        if (m_pending.at(i).edit.page == page
+            && sameBounds(m_pending.at(i).edit.paragraph.bounds, originalBounds)) {
+            m_pending.removeAt(i);
+            m_hoverPending = -1;
+            m_view->viewport()->update();
+            emit pendingChanged(int(m_pending.size()));
+            return;
+        }
+    }
+    m_view->viewport()->update();
+}
+
+void ReconstructionOverlay::deleteEdit()
+{
+    if (!m_editor)
+        return;
+
+    const int page = m_editPage;
+    const QRectF bounds = m_edited.bounds;
+
+    if (m_newText) {
+        closeEditor();
+        removePending(page, bounds);
+        return;
+    }
+
+    PendingReconstructionEdit pending;
+    ReconstructionEdit &edit = pending.edit;
+    edit.page = page;
+    edit.paragraph = m_edited;
+    edit.paragraph.runs.clear();
+    edit.paragraph.text.clear();
+    edit.region = m_region;
+    edit.firstBaselineY = m_baseline;
+    edit.fromTextLayer = (m_editSource == int(Reconstruction::PageSource::TextLayer));
+    edit.isNew = false;
+    pending.offset = QPointF();
+    pending.box = bounds;
+    pending.boxHeight = bounds.height();
+
+    closeEditor();
+    stage(std::move(pending));
 }
 
 void ReconstructionOverlay::setBold(bool on)
@@ -646,6 +1090,98 @@ void ReconstructionOverlay::setUnderlined(bool on)
     QTextCharFormat change;
     change.setFontUnderline(on);
     applyFormat(change);
+}
+
+void ReconstructionOverlay::setAlignment(Qt::AlignmentFlag alignment)
+{
+    if (!m_editor || m_edited.alignment == alignment)
+        return;
+
+    m_edited.alignment = alignment;
+    if (m_newText)
+        m_newTextAlignment = alignment;
+
+    QTextDocument *document = m_editor->document();
+    const bool wasEmpty = document->isEmpty();
+    const bool modified = document->isModified();
+
+    if (alignment == Qt::AlignJustify && !m_newText)
+        reflowForJustify();
+
+    QTextOption option = document->defaultTextOption();
+    option.setAlignment(alignment);
+    document->setDefaultTextOption(option);
+
+    QTextBlockFormat format;
+    format.setAlignment(alignment);
+    QTextCursor all(document);
+    all.select(QTextCursor::Document);
+    all.mergeBlockFormat(format);
+
+    if (wasEmpty && m_newText)
+        document->setModified(modified);
+
+    emitFormat();
+}
+
+void ReconstructionOverlay::reflowForJustify()
+{
+    if (!m_editor)
+        return;
+
+    QTextDocument *document = m_editor->document();
+    document->documentLayout()->documentSize();
+
+    double widest = 0.0;
+    for (QTextBlock block = document->begin(); block.isValid(); block = block.next()) {
+        const QTextLayout *layout = block.layout();
+        for (int i = 0; layout && i < layout->lineCount(); ++i)
+            widest = qMax(widest, layout->lineAt(i).naturalTextWidth());
+    }
+    if (widest <= 0.0)
+        return;
+
+    struct Join
+    {
+        int separator = 0;
+        bool space = true;
+    };
+    QVector<Join> joins;
+
+    for (QTextBlock block = document->begin(); block.isValid() && block.next().isValid();
+         block = block.next()) {
+        const QTextLayout *layout = block.layout();
+        if (!layout || layout->lineCount() == 0)
+            continue;
+
+        const QString text = block.text();
+        const QString nextText = block.next().text();
+        if (text.trimmed().isEmpty() || nextText.trimmed().isEmpty())
+            continue;
+        if (layout->lineAt(layout->lineCount() - 1).naturalTextWidth() < 0.75 * widest)
+            continue;
+
+        const int tab = nextText.indexOf(QLatin1Char('\t'));
+        if (tab > 0 && tab <= 4)
+            continue;
+
+        Join join;
+        join.separator = block.position() + block.length() - 1;
+        join.space = !text.endsWith(QLatin1Char('-')) && !text.endsWith(QLatin1Char(' '));
+        joins.append(join);
+    }
+    if (joins.isEmpty())
+        return;
+
+    QTextCursor cursor(document);
+    cursor.beginEditBlock();
+    for (int i = int(joins.size()) - 1; i >= 0; --i) {
+        cursor.setPosition(joins.at(i).separator);
+        cursor.deleteChar();
+        if (joins.at(i).space)
+            cursor.insertText(QStringLiteral(" "));
+    }
+    cursor.endEditBlock();
 }
 
 void ReconstructionOverlay::setTextColor(const QColor &color)
@@ -711,9 +1247,16 @@ void ReconstructionOverlay::refitLineHeight()
         }
     }
 
+    biggest = qMax(biggest,
+                   m_editor->currentCharFormat().property(Reconstruction::kFontSizeProperty)
+                       .toDouble());
+
+    const double spacing = (m_newText && biggest > 0.0)
+                               ? biggest * 1.2
+                               : Reconstruction::lineSpacingFor(m_edited, biggest);
+
     QTextBlockFormat blockFormat;
-    blockFormat.setLineHeight(Reconstruction::lineSpacingFor(m_edited, biggest) * m_editScale,
-                              QTextBlockFormat::FixedHeight);
+    blockFormat.setLineHeight(spacing * m_editScale, QTextBlockFormat::FixedHeight);
 
     QTextCursor all(document);
     all.select(QTextCursor::Document);
@@ -753,6 +1296,7 @@ ReconstructionFormat ReconstructionOverlay::currentFormat() const
     result.bold = format.font().bold();
     result.italic = format.font().italic();
     result.underlined = format.fontUnderline();
+    result.alignment = m_edited.alignment;
     return result;
 }
 
@@ -792,6 +1336,57 @@ bool ReconstructionOverlay::eventFilter(QObject *watched, QEvent *event)
         }
     }
 
+    if (m_deleteHandle && watched == m_deleteHandle) {
+        switch (event->type()) {
+        case QEvent::MouseButtonPress:
+            if (m_editor)
+                m_editor->setFocus(Qt::MouseFocusReason);
+            return true;
+        case QEvent::MouseButtonRelease: {
+            auto *mouse = static_cast<QMouseEvent *>(event);
+            if (mouse->button() == Qt::LeftButton
+                && m_deleteHandle->rect().contains(mouse->position().toPoint()))
+                deleteEdit();
+            return true;
+        }
+        default:
+            break;
+        }
+    }
+
+    for (int corner = 0; corner < 4; ++corner) {
+        if (!m_resizeHandles[corner] || watched != m_resizeHandles[corner])
+            continue;
+
+        switch (event->type()) {
+        case QEvent::MouseButtonPress: {
+            auto *mouse = static_cast<QMouseEvent *>(event);
+            if (mouse->button() == Qt::LeftButton) {
+                m_resizeCorner = corner;
+                m_resizeStartMouse = mouse->globalPosition();
+                m_resizeStartRegion = m_region;
+                m_resizeStartOffset = m_offset;
+                m_resizeStartHeight = m_boxHeight;
+            }
+            if (m_editor)
+                m_editor->setFocus(Qt::MouseFocusReason);
+            return true;
+        }
+        case QEvent::MouseMove:
+            if (m_resizeCorner == corner && m_view->m_scale > 0.0) {
+                const QPointF moved =
+                    static_cast<QMouseEvent *>(event)->globalPosition() - m_resizeStartMouse;
+                resizeEditorTo(corner, moved / m_view->m_scale);
+            }
+            return true;
+        case QEvent::MouseButtonRelease:
+            m_resizeCorner = -1;
+            return true;
+        default:
+            break;
+        }
+    }
+
     if (m_editor && watched == m_editor) {
         if (event->type() == QEvent::ShortcutOverride) {
             auto *key = static_cast<QKeyEvent *>(event);
@@ -824,6 +1419,7 @@ bool ReconstructionOverlay::eventFilter(QObject *watched, QEvent *event)
                 case Qt::Key_Right: moveEditorTo(m_offset + QPointF(step, 0.0)); return true;
                 case Qt::Key_Up:    moveEditorTo(m_offset + QPointF(0.0, -step)); return true;
                 case Qt::Key_Down:  moveEditorTo(m_offset + QPointF(0.0, step)); return true;
+                case Qt::Key_Delete: deleteEdit(); return true;
                 default: break;
                 }
             }

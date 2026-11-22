@@ -31,6 +31,7 @@
 #include <QThreadPool>
 #include <QStringList>
 #include <QTextCursor>
+#include <QTextOption>
 #include <QTimer>
 #include <QWheelEvent>
 #include <QtMath>
@@ -700,7 +701,6 @@ void PageView::discardQueuedPageRenders()
 
 std::array<RasterStore *, 3> PageView::rasterStores()
 {
-    // Base, page, tile: the order the shared budget breaks eviction ties in.
     return { &m_baseStore, &m_pageStore, &m_tileStore };
 }
 
@@ -741,8 +741,6 @@ void PageView::enforcePageRasterBudget()
 
     int evicted = 0;
     if (rasterCostKilobytes() > m_sharedRasterBudgetKilobytes) {
-        // Gather the cached rasters once, then evict from the farthest page
-        // inward, one page at a time.
         struct Entry {
             int page;
             int distance;
@@ -780,8 +778,6 @@ void PageView::enforcePageRasterBudget()
     }
 }
 
-// A tiled page needs every visible tile cached at once. With a smaller cache
-// the tiles evict each other and parts of the page stay blank or out of date.
 void PageView::reserveTileCache(int visibleTiles)
 {
     constexpr int tileKilobytes = kPageTileSize * kPageTileSize * 4 / 1024;
@@ -1068,8 +1064,6 @@ QPixmap PageView::pageTile(int page, const QSize &fullSize, int tileX, int tileY
     return cached ? *cached : QPixmap();
 }
 
-// Returns the cached raster for key (possibly stale), and starts a background
-// render when it is missing or stale and no failure or render is outstanding.
 const QPixmap *PageView::rasterFor(RasterStore &store, const RasterKey &key,
                                    const QSize &renderSize, const QRectF &pageRegion,
                                    qreal dpr)
@@ -1287,8 +1281,6 @@ void PageView::appendErasedInk(QPainterPath &erasedInk, const QVector<Stroke> &s
     }
 }
 
-// The page itself: white backing, the rendered page (or its tiles), and the
-// eraser preview that shows the page without the ink being erased.
 void PageView::drawPageRaster(QPainter &painter, int page, const QRect &target,
                               const QRect &exposed, qreal dpr)
 {
@@ -1358,7 +1350,6 @@ void PageView::drawSelectionHighlight(QPainter &painter, int page, const QRect &
     }
 }
 
-// Shows a text box at its new bounds while the page raster still has it at the old ones.
 void PageView::drawTextAnnotationPreview(QPainter &painter, int page, const QRect &target,
                                          qreal dpr, const QRectF &oldBounds,
                                          const QRectF &newBounds, const QString &text,
@@ -1384,7 +1375,7 @@ void PageView::drawTextAnnotationPreview(QPainter &painter, int page, const QRec
     painter.setFont(font);
     painter.setPen(style.color);
     painter.drawText(pageToViewport(target, newBounds),
-                     Qt::AlignLeft | Qt::AlignTop | Qt::TextWordWrap, text);
+                     int(style.alignment) | int(Qt::AlignTop) | int(Qt::TextWordWrap), text);
     painter.restore();
 }
 
@@ -1408,7 +1399,6 @@ void PageView::drawImageStampPreview(QPainter &painter, int page, const QRect &t
     }
 }
 
-// Everything drawn over a page: selections, in-progress edits, ink and tool previews.
 void PageView::drawPageOverlays(QPainter &painter, int page, const QRect &target, qreal dpr)
 {
     painter.save();
@@ -1465,6 +1455,10 @@ void PageView::drawPageOverlays(QPainter &painter, int page, const QRect &target
     }
     if (m_drawing && m_activeStroke.page == page)
         drawStroke(painter, m_activeStroke, target);
+
+    if (m_imageActive && m_imagePage == page && !m_replacedImageId.isEmpty())
+        drawImageStampPreview(painter, page, target, dpr, m_replacedImageBounds,
+                              QRectF(), QImage());
 
     if (m_imageActive && m_imagePage == page)
         drawImagePlacement(painter, target);
@@ -1596,6 +1590,11 @@ void PageView::keyPressEvent(QKeyEvent *event)
         return;
     }
 
+    if (event->key() == Qt::Key_Escape && m_reconstruction->isAddingText()) {
+        m_reconstruction->setAddTextMode(false);
+        return;
+    }
+
     if (m_imageAwaiting || m_imageActive) {
         if (event->key() == Qt::Key_Escape) {
             finishImage(false);
@@ -1686,10 +1685,6 @@ void PageView::updateSelection()
         std::swap(a, b);
     }
 
-    // Extracting text is the expensive part. The end pages change as the mouse
-    // moves, so they are resolved now, along with pages near the viewport. Pages
-    // in between keep the same range, so earlier results are reused, and
-    // distant ones wait until they are painted or copied.
     constexpr int kNearPages = 1;
     const QPair<int, int> visible = visiblePageRange();
     const auto previousBegin = previous.cbegin();
@@ -1960,7 +1955,6 @@ void PageView::clearRedactionAreas()
     emit redactionAreasChanged(0);
 }
 
-// Removes one marked area (the Tools pane's list calls this).
 void PageView::removeRedactionArea(int index)
 {
     if (index < 0 || index >= m_redactionAreas.size())
@@ -1971,8 +1965,6 @@ void PageView::removeRedactionArea(int index)
     emit redactionAreasChanged(m_redactionAreas.size());
 }
 
-// Draws one marked area in orange, so the list entry that is selected can be
-// found on the page. -1 (or an index that does not exist) highlights none.
 void PageView::setHighlightedRedactionArea(int index)
 {
     if (index < 0 || index >= m_redactionAreas.size())
@@ -2134,6 +2126,51 @@ void PageView::cancelImagePlacement()
     finishImage(false);
 }
 
+void PageView::beginImageStampCrop()
+{
+    if (m_selectedImagePage < 0 || m_selectedImagePixmap.isNull()
+        || m_imageAwaiting || m_imageActive)
+        return;
+
+    const int page = m_selectedImagePage;
+    const QString id = m_selectedImageId;
+    const QRectF bounds = m_selectedImageBounds;
+
+    QImage image = m_selectedImagePixmap.convertToFormat(QImage::Format_ARGB32);
+    bool opaque = true;
+    for (int y = 0; y < image.height() && opaque; ++y) {
+        const QRgb *line = reinterpret_cast<const QRgb *>(image.constScanLine(y));
+        for (int x = 0; x < image.width(); ++x) {
+            if (qAlpha(line[x]) < 250) {
+                opaque = false;
+                break;
+            }
+        }
+    }
+    if (opaque)
+        image = image.convertToFormat(QImage::Format_RGB32);
+
+    clearSelectedTextAnnotation();
+    clearSelectedImageStamp();
+    clearSelection();
+
+    m_pendingImage = image;
+    m_imagePage = page;
+    m_imageRect = bounds;
+    m_imageAwaiting = false;
+    m_imageActive = true;
+    m_imageDrag = ImageDrag::None;
+    m_replacedImageId = id;
+    m_replacedImageBounds = bounds;
+    m_replacedImageKey = m_pendingImage.cacheKey();
+
+    setFocus();
+    emit imagePlacementStateChanged(true, true);
+    emit pendingChangesChanged();
+    setImageCropMode(true);
+    viewport()->update();
+}
+
 void PageView::finishImage(bool commit)
 {
     if (!m_imageAwaiting && !m_imageActive)
@@ -2145,6 +2182,14 @@ void PageView::finishImage(bool commit)
     const int page = m_imagePage;
     const QRectF box = m_imageRect;
 
+    const QString replacedId = m_replacedImageId;
+    const QRectF replacedBounds = m_replacedImageBounds;
+    const bool unchanged = !replacedId.isEmpty() && box == replacedBounds
+                           && image.cacheKey() == m_replacedImageKey;
+    m_replacedImageId.clear();
+    m_replacedImageBounds = QRectF();
+    m_replacedImageKey = 0;
+
     m_imageAwaiting = false;
     m_imageActive = false;
     m_imageCropping = false;
@@ -2155,8 +2200,14 @@ void PageView::finishImage(bool commit)
     viewport()->setCursor(Qt::ArrowCursor);
     viewport()->update();
 
-    if (commit && wasActive)
-        emit imagePlaced(page, box, image);
+    if (commit && wasActive) {
+        if (replacedId.isEmpty()) {
+            emit imagePlaced(page, box, image);
+        } else if (!unchanged) {
+            m_pendingImageStampPreview = { page, replacedBounds, box, image };
+            emit imageStampReplaced(page, replacedId, box, image);
+        }
+    }
     emit imagePlacementStateChanged(false, false);
     if (wasCropping)
         emit imageCropModeChanged(false);
@@ -2349,7 +2400,8 @@ void PageView::setTextStyle(const TextStyle &style)
                 || m_editorStyle.color != style.color
                 || m_editorStyle.bold != style.bold
                 || m_editorStyle.italic != style.italic
-                || m_editorStyle.underline != style.underline))
+                || m_editorStyle.underline != style.underline
+                || m_editorStyle.alignment != style.alignment))
             m_editingTextAnnotationStyleChanged = true;
         m_editorStyle = style;
         applyEditorStyle();
@@ -3211,6 +3263,9 @@ void PageView::mouseReleaseEvent(QMouseEvent *event)
         return;
     }
 
+    if (m_reconstruction->handleMouseRelease(event))
+        return;
+
     if (m_redactionTool) {
         if (m_redactionDrawing && event->button() == Qt::LeftButton
             && m_redactionPage >= 0 && m_redactionPage < m_pageSizes.size()) {
@@ -3478,6 +3533,12 @@ void PageView::applyEditorStyle()
             .arg(m_editorStyle.bold ? QStringLiteral("bold") : QStringLiteral("normal"),
                  m_editorStyle.italic ? QStringLiteral("italic") : QStringLiteral("normal"))
             .arg(m_editorStyle.underline ? QStringLiteral("underline") : QStringLiteral("none")));
+
+    QTextOption option = m_editor->document()->defaultTextOption();
+    if (option.alignment() != Qt::Alignment(m_editorStyle.alignment)) {
+        option.setAlignment(m_editorStyle.alignment);
+        m_editor->document()->setDefaultTextOption(option);
+    }
 }
 
 void PageView::positionEditor()

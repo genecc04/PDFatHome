@@ -29,6 +29,7 @@ struct ReconstructionEdit
     QRectF region;
     double firstBaselineY = 0.0;
     bool fromTextLayer = false;
+    bool isNew = false;
 };
 
 struct PendingReconstructionEdit
@@ -38,6 +39,7 @@ struct PendingReconstructionEdit
     QRectF box;
     std::shared_ptr<QTextDocument> preview;
     double previewScale = 0.0;
+    double boxHeight = 0.0;
 };
 
 struct ReconstructionFormat
@@ -49,6 +51,7 @@ struct ReconstructionFormat
     bool bold = false;
     bool italic = false;
     bool underlined = false;
+    Qt::AlignmentFlag alignment = Qt::AlignLeft;
 };
 
 class ReconstructionOverlay : public QObject
@@ -67,7 +70,11 @@ public:
     void setBold(bool on);
     void setItalic(bool on);
     void setUnderlined(bool on);
+    void setAlignment(Qt::AlignmentFlag alignment);
     void setActive(bool active);
+
+    void setAddTextMode(bool on);
+    bool isAddingText() const { return m_addMode; }
 
     void setResult(int page, std::shared_ptr<const Reconstruction::ReconstructedPage> result,
                    int source);
@@ -77,10 +84,13 @@ public:
     void paint(QPainter &painter, int page, const QRect &target);
     bool handleMousePress(QMouseEvent *event);
     bool handleMouseMove(const QPoint &pos);
+    bool handleMouseRelease(QMouseEvent *event);
     void reposition();
     bool hasPendingEdit() const;
     void commitEdit();
     void cancelEdit();
+
+    void deleteEdit();
 
     int pendingCount() const { return int(m_pending.size()); }
     QVector<PendingReconstructionEdit> takePending();
@@ -94,6 +104,7 @@ signals:
     void applyRequested();
     void editingChanged(bool editing);
     void formatChanged(const ReconstructionFormat &format);
+    void addTextModeChanged(bool on);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -113,11 +124,18 @@ private:
     void layoutEditor();
     void moveEditorTo(const QPointF &offset);
     void positionHandle();
+    void resizeEditorTo(int corner, const QPointF &delta);
+    void startNewText(int page, const QRectF &rect);
+    bool editorChanged() const;
     void rebuildEditorDocument(double scale);
     void fitEditorHeight();
     void toggleFormat(int which);
     void applyFormat(const QTextCharFormat &change);
     void refitLineHeight();
+    void applyNewTextStyle(double scale);
+    void rememberNewTextStyle();
+    void reflowForJustify();
+    void removePending(int page, const QRectF &originalBounds);
     void emitFormat();
     ReconstructionFormat currentFormat() const;
 
@@ -142,9 +160,29 @@ private:
     int m_minHeight = 20;
 
     QWidget *m_handle = nullptr;
+    QWidget *m_deleteHandle = nullptr;
     QPointF m_offset;
     QPointF m_startOffset;
     bool m_moving = false;
     QPointF m_moveStartMouse;
     QPointF m_moveStartOffset;
+
+    QWidget *m_resizeHandles[4] = {};
+    int m_resizeCorner = -1;
+    QPointF m_resizeStartMouse;
+    QRectF m_resizeStartRegion;
+    QPointF m_resizeStartOffset;
+    double m_resizeStartHeight = 0.0;
+    double m_boxHeight = 0.0;
+    QRectF m_startRegion;
+    double m_startBoxHeight = 0.0;
+
+    bool m_newText = false;
+    Reconstruction::TextRun m_newTextStyle;
+    Qt::AlignmentFlag m_newTextAlignment = Qt::AlignLeft;
+    bool m_addMode = false;
+    bool m_addDragging = false;
+    int m_addPage = -1;
+    QPointF m_addStart;
+    QPointF m_addEnd;
 };

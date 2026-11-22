@@ -35,7 +35,7 @@ try {
 
     foreach ($requiredPath in @("LICENSE", "THIRD_PARTY_NOTICES.md", "licenses\LGPL-3.0.txt",
                                 "licenses\GPL-3.0.txt", "licenses\AGPL-3.0.txt",
-                                "licenses\vcpkg")) {
+                                "licenses\vcpkg", "licenses\vcpkg\tesseract-copyright.txt")) {
         if (-not (Test-Path $requiredPath)) {
             throw "Required license material is missing: '$requiredPath'."
         }
@@ -84,6 +84,12 @@ try {
     Copy-Item "LICENSE" $stagePath
     Copy-Item "THIRD_PARTY_NOTICES.md" $stagePath
     Copy-Item "licenses" $stagePath -Recurse
+
+    if (Test-Path "tessdata" -PathType Container) {
+        Copy-Item "tessdata" $stagePath -Recurse
+    } else {
+        Write-Warning "tessdata folder not found: OCR of scanned pages will be unavailable in this package."
+    }
 
     @"
 This archive contains dynamically linked Qt DLLs as separate files. Do not add

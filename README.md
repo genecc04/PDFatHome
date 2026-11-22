@@ -1,6 +1,6 @@
 # PDF@home
 
-**Version 1.0**
+**Version 1.2.0**
 
 A desktop PDF reader and editor for Windows, built with C++, Qt 6, MuPDF and Tesseract.
 MuPDF handles PDF loading, rendering, search and editing; Qt provides the user
@@ -30,7 +30,9 @@ web links embedded in a PDF in your default browser after you confirm.
 
 **Marking up and filling out**
 - Fill PDF forms; add and edit text, highlights, drawings, and images
-- Create visual E-signatures by typing, drawing, or uploading; save and manage them locally
+- Create visual E-signatures by typing, drawing, or uploading; saved signatures are
+  listed in the Tools pane, where you click one to place it or right-click to rename or
+  delete it (they are stored locally)
 - Move, resize, crop, or delete added images and signatures
 - Tool options (font and size, pen and highlighter settings, image crop and delete,
   the list of marked redaction areas) are in the Tools pane on the right

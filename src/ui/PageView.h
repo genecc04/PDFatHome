@@ -47,6 +47,7 @@ public:
         bool bold = false;
         bool italic = false;
         bool underline = false;
+        Qt::AlignmentFlag alignment = Qt::AlignLeft;
     };
 
     struct DrawStyle {
@@ -80,7 +81,6 @@ public:
     explicit PageView(QWidget *parent = nullptr);
     ~PageView() override;
 
-    // pageSizes, when its length matches the page count, saves asking the document for them.
     void setDocument(PdfEditor *document, bool preserveRasterPreviews = false,
                      const QVector<QSizeF> &pageSizes = {});
     void setLoading(bool loading);
@@ -128,6 +128,7 @@ public:
     ReconstructionOverlay *reconstruction() const { return m_reconstruction; }
     void setImageCropMode(bool active);
     void cancelImagePlacement();
+    void beginImageStampCrop();
 
     void setDrawToolActive(bool active);
     void setDrawStyle(const DrawStyle &style);
@@ -183,6 +184,8 @@ signals:
     void imageStampDeleteRequested(int page, const QString &id);
     void imageStampSelectionChanged(bool selected);
     void imagePlaced(int page, const QRectF &boxPoints, const QImage &image);
+    void imageStampReplaced(int page, const QString &oldId, const QRectF &boxPoints,
+                            const QImage &image);
     void imagePlacementStateChanged(bool active, bool positioned);
     void imageCropModeChanged(bool active);
     void redactionAreasChanged(int count);
@@ -236,8 +239,6 @@ private:
         int page = -1;
         QList<QPolygonF> bounds;
         QString text;
-        // The range this part covers on its page. Parts far from the viewport
-        // are left unresolved until they are painted or copied.
         QPointF start;
         QPointF end;
         bool resolved = true;
@@ -451,6 +452,9 @@ private:
     int m_imageHandle = -1;
     QPointF m_imageGrab;
     QPointF m_imageAnchor;
+    QString m_replacedImageId;
+    QRectF m_replacedImageBounds;
+    qint64 m_replacedImageKey = 0;
 
     // text selection
     bool m_selecting = false;

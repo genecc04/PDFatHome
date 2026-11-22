@@ -283,6 +283,12 @@ QVector<PlacedSpan> placeSpans(const TextParagraph &paragraph, const QRectF &reg
             const int lineEnd = lineStart + line.textLength();
             const double baselineY = top + (blockPos.y() + line.y() + line.ascent()) / k;
 
+            // Justified text is spread over the line by Qt, but a PDF text piece is drawn with
+            // its font's own spaces. So on a justified line every word is placed at the x
+            // Qt gave it. (The last line of a paragraph is not justified.)
+            const bool justified = paragraph.alignment == Qt::AlignJustify
+                                   && li < textLayout->lineCount() - 1;
+
             for (QTextBlock::iterator it = block.begin(); !it.atEnd(); ++it) {
                 const QTextFragment fragment = it.fragment();
                 if (!fragment.isValid())
@@ -311,6 +317,26 @@ QVector<PlacedSpan> placeSpans(const TextParagraph &paragraph, const QRectF &reg
                 if (sizePt <= 0.0)
                     sizePt = format.font().pixelSize() / k;
 
+                // One piece of text on this line, from character a up to b. widthEnd is where
+                // its underline stops.
+                const auto addSpan = [&](int a, int b, int widthEnd) {
+                    const double x0 = line.cursorToX(a);
+                    const double x1 = line.cursorToX(widthEnd);
+
+                    PlacedSpan span;
+                    span.text = blockText.mid(a, b - a);
+                    span.baseFont = pdfBaseFont(family, bold, italic);
+                    span.sizePoints = sizePt;
+                    span.color = format.foreground().color();
+                    span.underlined = format.fontUnderline();
+                    span.bold = bold;
+                    span.italic = italic;
+                    span.systemFamily = systemFamily;
+                    span.origin = QPointF(region.left() + (blockPos.x() + x0) / k, baselineY);
+                    span.width = (x1 - x0) / k;
+                    spans.append(span);
+                };
+
                 // A tab (list marker gap) splits a piece in two; each half is placed at its own x so the gap survives.
                 int pieceStart = from;
                 for (int pos = from; pos <= to; ++pos) {
@@ -325,23 +351,28 @@ QVector<PlacedSpan> placeSpans(const TextParagraph &paragraph, const QRectF &reg
                     while (b > a && blockText.at(b - 1).isSpace())
                         --b;
 
-                    if (b > a) {
-                        const double x0 = line.cursorToX(a);
-                        const double x1 = line.cursorToX(b);
-
-                        PlacedSpan span;
-                        span.text = blockText.mid(a, b - a);
-                        span.baseFont = pdfBaseFont(family, bold, italic);
-                        span.sizePoints = sizePt;
-                        span.color = format.foreground().color();
-                        span.underlined = format.fontUnderline();
-                        span.bold = bold;
-                        span.italic = italic;
-                        span.systemFamily = systemFamily;
-                        span.origin = QPointF(region.left() + (blockPos.x() + x0) / k,
-                                              baselineY);
-                        span.width = (x1 - x0) / k;
-                        spans.append(span);
+                    if (b > a && !justified) {
+                        addSpan(a, b, b);
+                    } else if (b > a) {
+                        // Split the piece into words. A word's underline runs on to the next
+                        // word, so an underlined justified line stays one line.
+                        QVector<int> wordStarts;
+                        QVector<int> wordEnds;
+                        int wordStart = a;
+                        for (int i = a; i <= b; ++i) {
+                            if (i < b && !blockText.at(i).isSpace())
+                                continue;
+                            if (i > wordStart) {
+                                wordStarts.append(wordStart);
+                                wordEnds.append(i);
+                            }
+                            wordStart = i + 1;
+                        }
+                        for (int w = 0; w < int(wordStarts.size()); ++w) {
+                            const int widthEnd =
+                                (w + 1 < int(wordStarts.size())) ? wordStarts.at(w + 1) : b;
+                            addSpan(wordStarts.at(w), wordEnds.at(w), widthEnd);
+                        }
                     }
 
                     pieceStart = pos + 1;

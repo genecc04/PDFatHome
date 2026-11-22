@@ -97,15 +97,17 @@ public:
     PdfEditor &operator=(const PdfEditor &) = delete;
     bool addTextBox(int pageIndex, const QRectF &box, const QString &text,
                 const QString &fontName, double fontSize,
-                float red, float green, float blue, bool underline = false);
+                float red, float green, float blue, bool underline = false,
+                int alignment = 0);
     bool textAnnotationAt(int pageIndex, const QPointF &point,
                           int *annotationId, QRectF *bounds, QString *text,
                           QString *fontName, double *fontSize, QColor *color,
-                          bool *underline = nullptr);
+                          bool *underline = nullptr, int *alignment = nullptr);
     bool updateTextAnnotation(int pageIndex, int annotationId,
                               const QString &oldText, const QString &newText,
                               const QString &fontName, double fontSize,
-                              float red, float green, float blue, bool underline = false);
+                              float red, float green, float blue, bool underline = false,
+                              int alignment = 0);
     bool setTextAnnotationBounds(int pageIndex, int annotationId, const QString &text,
                                  const QRectF &bounds);
     bool deleteTextAnnotation(int pageIndex, int annotationId, const QString &text);

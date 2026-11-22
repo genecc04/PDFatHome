@@ -97,33 +97,48 @@ bool isAppImageAnnotation(fz_context *ctx, pdf_annot *annot)
     return annotNameHasPrefix(ctx, annot, kImageAnnotPrefix);
 }
 
+// The /Q (quadding) value of a text box: 0 left, 1 center, 2 right. Justify has none, so it is 0 here and the alignment is carried by the rich text instead.
+int quaddingFor(int alignment)
+{
+    return alignment == 1 || alignment == 2 ? alignment : 0;
+}
+
 QByteArray richTextFor(const QString &text, const QString &fontName, double fontSize,
-                       float red, float green, float blue)
+                       float red, float green, float blue, bool underline, int alignment)
 {
     const QString family = AnnotationFonts::family(fontName);
     const QString css = family == QLatin1String("Times")     ? QStringLiteral("serif")
                       : family == QLatin1String("Courier")   ? QStringLiteral("monospace")
                                                              : QStringLiteral("sans-serif");
     const QColor color(qRound(red * 255.0f), qRound(green * 255.0f), qRound(blue * 255.0f));
+    const QString align = alignment == 1 ? QStringLiteral("center")
+                        : alignment == 2 ? QStringLiteral("right")
+                        : alignment == 3 ? QStringLiteral("justify")
+                                         : QStringLiteral("left");
 
     QString html = QStringLiteral(
                        "<?xml version=\"1.0\"?>"
                        "<body xmlns=\"http://www.w3.org/1999/xhtml\" "
                        "style=\"font-family:%1;font-size:%2pt;color:%3;font-weight:%4;"
-                       "font-style:%5\">")
+                       "font-style:%5;text-align:%6\">")
                        .arg(css, QString::number(fontSize, 'f', 1), color.name(),
                             AnnotationFonts::isBold(fontName) ? QStringLiteral("bold")
                                                               : QStringLiteral("normal"),
                             AnnotationFonts::isItalic(fontName) ? QStringLiteral("italic")
-                                                                : QStringLiteral("normal"));
+                                                                : QStringLiteral("normal"),
+                            align);
 
     const QStringList lines = text.split(QLatin1Char('\n'));
     for (const QString &line : lines) {
+        const QString paragraph = QStringLiteral("<p style=\"text-align:") + align
+                                  + QStringLiteral("\">");
         if (line.isEmpty())
-            html += QStringLiteral("<p><br/></p>");
-        else
-            html += QStringLiteral("<p><span style=\"text-decoration:underline\">")
+            html += paragraph + QStringLiteral("<br/></p>");
+        else if (underline)
+            html += paragraph + QStringLiteral("<span style=\"text-decoration:underline\">")
                     + line.toHtmlEscaped() + QStringLiteral("</span></p>");
+        else
+            html += paragraph + line.toHtmlEscaped() + QStringLiteral("</p>");
     }
     html += QStringLiteral("</body>");
     return html.toUtf8();
@@ -1250,7 +1265,7 @@ bool PdfEditor::highlightText(const QString &text, QList<int> *changedPages,
 
 bool PdfEditor::addTextBox(int pageIndex, const QRectF &box, const QString &text,
                            const QString &fontName, double fontSize,
-                           float red, float green, float blue, bool underline)
+                           float red, float green, float blue, bool underline, int alignment)
 {
     if (!m_doc) {
         m_error = "No document is open.";
@@ -1264,8 +1279,11 @@ bool PdfEditor::addTextBox(int pageIndex, const QRectF &box, const QString &text
         .append(QUuid::createUuid().toString(QUuid::WithoutBraces)).toUtf8();
     const char *cText = textUtf8.constData();
     const char *cFont = fontUtf8.constData();
+    const bool rich = underline || alignment == 3;
+    const int quadding = quaddingFor(alignment);
     const QByteArray richUtf8 =
-        underline ? richTextFor(text, fontName, fontSize, red, green, blue) : QByteArray();
+        rich ? richTextFor(text, fontName, fontSize, red, green, blue, underline, alignment)
+             : QByteArray();
     const float color[3] = { red, green, blue };
     const fz_rect rect = fz_make_rect(float(box.left()), float(box.top()),
                                       float(box.right()), float(box.bottom()));
@@ -1286,7 +1304,9 @@ bool PdfEditor::addTextBox(int pageIndex, const QRectF &box, const QString &text
         pdf_set_annot_rect(m_ctx, annot, rect);
         pdf_set_annot_default_appearance(m_ctx, annot, cFont, float(fontSize), 3, color);
         pdf_set_annot_contents(m_ctx, annot, cText);
-        if (underline)
+        pdf_dict_puts_drop(m_ctx, pdf_annot_obj(m_ctx, annot), "Q",
+                           pdf_new_int(m_ctx, quadding));
+        if (rich)
             pdf_dict_puts_drop(m_ctx, pdf_annot_obj(m_ctx, annot), "RC",
                                pdf_new_text_string(m_ctx, richUtf8.constData()));
         pdf_update_annot(m_ctx, annot);
@@ -1309,7 +1329,7 @@ bool PdfEditor::addTextBox(int pageIndex, const QRectF &box, const QString &text
 bool PdfEditor::textAnnotationAt(int pageIndex, const QPointF &point,
                                  int *annotationId, QRectF *bounds, QString *text,
                                  QString *fontName, double *fontSize, QColor *color,
-                                 bool *underline)
+                                 bool *underline, int *alignment)
 {
     m_error.clear();
     if (!m_doc) {
@@ -1367,11 +1387,19 @@ bool PdfEditor::textAnnotationAt(int pageIndex, const QPointF &point,
                                          appearanceColor);
             *fontName = QString::fromLatin1(appearanceFont ? appearanceFont : "Helv");
             *fontSize = appearanceSize;
-            if (underline) {
+            if (underline || alignment) {
                 pdf_obj *rich = pdf_dict_gets(m_ctx, pdf_annot_obj(m_ctx, annot), "RC");
                 const char *richText = rich && pdf_is_string(m_ctx, rich)
                                            ? pdf_to_text_string(m_ctx, rich) : nullptr;
-                *underline = richText && std::strstr(richText, "underline") != nullptr;
+                if (underline)
+                    *underline = richText && std::strstr(richText, "underline") != nullptr;
+                if (alignment) {
+                    int quadding = pdf_to_int(
+                        m_ctx, pdf_dict_gets(m_ctx, pdf_annot_obj(m_ctx, annot), "Q"));
+                    if (richText && std::strstr(richText, "text-align:justify") != nullptr)
+                        quadding = 3;
+                    *alignment = quadding >= 1 && quadding <= 3 ? quadding : 0;
+                }
             }
             if (colorComponents == 1) {
                 const int gray = qRound(appearanceColor[0] * 255.0f);
@@ -1418,7 +1446,8 @@ bool sameTextAnnotation(fz_context *ctx, pdf_annot *annot, int annotationId,
 bool PdfEditor::updateTextAnnotation(int pageIndex, int annotationId,
                                      const QString &oldText, const QString &newText,
                                      const QString &fontName, double fontSize,
-                                     float red, float green, float blue, bool underline)
+                                     float red, float green, float blue, bool underline,
+                                     int alignment)
 {
     m_error.clear();
     if (!m_doc) {
@@ -1431,8 +1460,11 @@ bool PdfEditor::updateTextAnnotation(int pageIndex, int annotationId,
     }
 
     const QByteArray newTextUtf8 = newText.toUtf8();
+    const bool rich = underline || alignment == 3;
+    const int quadding = quaddingFor(alignment);
     const QByteArray richUtf8 =
-        underline ? richTextFor(newText, fontName, fontSize, red, green, blue) : QByteArray();
+        rich ? richTextFor(newText, fontName, fontSize, red, green, blue, underline, alignment)
+             : QByteArray();
     const QByteArray fontUtf8 = fontName.toUtf8();
     const float color[3] = { red, green, blue };
     clearSelectionTextCache();
@@ -1451,7 +1483,9 @@ bool PdfEditor::updateTextAnnotation(int pageIndex, int annotationId,
             pdf_set_annot_default_appearance(m_ctx, annot, fontUtf8.constData(),
                                              float(fontSize), 3, color);
             pdf_set_annot_contents(m_ctx, annot, newTextUtf8.constData());
-            if (underline)
+            pdf_dict_puts_drop(m_ctx, pdf_annot_obj(m_ctx, annot), "Q",
+                               pdf_new_int(m_ctx, quadding));
+            if (rich)
                 pdf_dict_puts_drop(m_ctx, pdf_annot_obj(m_ctx, annot), "RC",
                                    pdf_new_text_string(m_ctx, richUtf8.constData()));
             else

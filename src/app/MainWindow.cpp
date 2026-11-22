@@ -165,8 +165,6 @@ void MainWindow::updateActions()
     const int pendingEdits = reconstruction->pendingCount();
     if (m_reconstructAction) {
         m_reconstructAction->setEnabled(editable);
-        // Stays on through a short edit operation (Apply reconstruction runs one);
-        // goes off only when the document can't be edited at all.
         const bool unavailable = !m_editor || m_viewOnly || m_documentLoadPending
                                  || signedDocument;
         if (unavailable && m_reconstructAction->isChecked())
@@ -178,25 +176,25 @@ void MainWindow::updateActions()
     if (m_discardReconstructionAction)
         m_discardReconstructionAction->setEnabled(editable && pendingEdits > 0);
 
-    // Undo takes back pending reconstruct edits one by one before it touches the
-    // saved history; Redo waits until there are none.
     m_undoAction->setEnabled(editable && (m_history.canUndo() || m_view->hasPendingStrokes()
                                           || pendingEdits > 0));
     m_redoAction->setEnabled(editable && m_history.canRedo() && pendingEdits == 0);
     m_addImageAction->setEnabled(editable);
-    m_cropImageAction->setEnabled(editable && m_view->hasPositionedImage());
+    m_cropImageAction->setEnabled(
+        editable && (m_view->hasPositionedImage() || m_view->hasSelectedImageStamp()));
     m_cancelImageAction->setEnabled(editable && m_view->hasActiveImagePlacement());
     m_deleteTextAction->setEnabled(editable && m_view->hasSelectedTextAnnotation());
     m_deleteImageAction->setEnabled(editable && m_view->hasSelectedImageStamp());
 
     m_drawAction->setEnabled(editable);
-    m_esignButton->setEnabled(editable);
+    m_esignAction->setEnabled(editable);
     m_esignTypeAction->setEnabled(editable);
     m_esignDrawAction->setEnabled(editable);
     m_esignUploadAction->setEnabled(editable);
-    m_manageESignaturesAction->setEnabled(editable);
     if ((!m_editor || m_documentLoadPending) && m_drawAction->isChecked())
         m_drawAction->setChecked(false);
+    if ((!m_editor || m_documentLoadPending || signedDocument) && m_esignAction->isChecked())
+        m_esignAction->setChecked(false);
     if ((!m_editor || m_documentLoadPending) && m_redactAction->isChecked())
         m_redactAction->setChecked(false);
     m_signAction->setEnabled(editable);

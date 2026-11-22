@@ -1,0 +1,13 @@
+OCR language data (tessdata)
+
+eng.traineddata is the English language model loaded by Tesseract OCR at run
+time. It is a data file, not program code. It comes from the official
+Tesseract OCR project's trained-data repositories:
+
+  https://github.com/tesseract-ocr/tessdata
+  https://github.com/tesseract-ocr/tessdata_fast
+  https://github.com/tesseract-ocr/tessdata_best
+
+The Tesseract project publishes these models under the Apache License,
+Version 2.0. The full license text is in licenses/vcpkg/tesseract-copyright.txt
+and at http://www.apache.org/licenses/LICENSE-2.0

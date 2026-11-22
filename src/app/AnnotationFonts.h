@@ -75,4 +75,25 @@ inline bool isItalic(const QString &name)
         || name.contains(QLatin1String("Oblique"), Qt::CaseInsensitive);
 }
 
+// Alignment of an added text box as the code PdfEditor takes: 0 left, 1 center, 2 right, 3 justify.
+inline int alignmentCode(Qt::AlignmentFlag alignment)
+{
+    switch (alignment) {
+    case Qt::AlignHCenter: return 1;
+    case Qt::AlignRight:   return 2;
+    case Qt::AlignJustify: return 3;
+    default:               return 0;
+    }
+}
+
+inline Qt::AlignmentFlag alignmentFromCode(int code)
+{
+    switch (code) {
+    case 1:  return Qt::AlignHCenter;
+    case 2:  return Qt::AlignRight;
+    case 3:  return Qt::AlignJustify;
+    default: return Qt::AlignLeft;
+    }
+}
+
 }

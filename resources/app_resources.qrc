@@ -21,5 +21,6 @@
         <file alias="markredaction.png">icons/markredaction.png</file>
         <file alias="esign.png">icons/esign.png</file>
         <file alias="deleteimage.png">icons/deleteimage.png</file>
+        <file alias="reconstruct.png">icons/reconstruct.png</file>
     </qresource>
 </RCC>

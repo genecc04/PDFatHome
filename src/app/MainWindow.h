@@ -20,6 +20,7 @@ class QDockWidget;
 class QDragEnterEvent;
 class QDropEvent;
 class QLabel;
+class QListWidget;
 class QComboBox;
 class QMenu;
 class QSpinBox;
@@ -92,7 +93,9 @@ private:
     void addTypedESignature();
     void drawESignature();
     void uploadESignature();
-    void manageESignatures();
+    void refreshESignatureList();
+    void useSavedESignature(const QString &filePath);
+    void showESignatureMenu(const QPoint &position);
     void saveESignature(const QImage &image, const QString &name);
     void beginESignaturePlacement(const QImage &image);
     void goToPage(int page);
@@ -137,6 +140,8 @@ private:
     void eraseInk(int page, const QVector<QPointF> &path, double radius);
     void addImage();
     void placeImage(int page, const QRectF &box, const QImage &image);
+    void replaceImageStamp(int page, const QString &oldId, const QRectF &box,
+                           const QImage &image);
     void exportPages(const QString &format);
     bool fillFormField(int page, const QPointF &point, PageView::FormField *field);
     bool commitFormField(int page, int widgetIndex, const QString &value);
@@ -202,8 +207,9 @@ private:
     QAction *m_esignTypeAction = nullptr;
     QAction *m_esignDrawAction = nullptr;
     QAction *m_esignUploadAction = nullptr;
-    QAction *m_manageESignaturesAction = nullptr;
-    QToolButton *m_esignButton = nullptr;
+    QAction *m_esignAction = nullptr;
+    QListWidget *m_signatureList = nullptr;
+    QLabel *m_signatureEmptyLabel = nullptr;
     QAction *m_cropImageAction = nullptr;
     QAction *m_cancelImageAction = nullptr;
     QString m_newPassword;
@@ -213,15 +219,13 @@ private:
     QAction *m_applyReconstructionAction = nullptr;
     QAction *m_discardReconstructionAction = nullptr;
 
-    // The text toolbar's controls. They style new text boxes and, while a
-    // reconstructed region is being edited, the text in its editor.
     QComboBox *m_fontBox = nullptr;
     QSpinBox *m_fontSizeBox = nullptr;
     ColorMenuButton *m_textColorButton = nullptr;
     QAction *m_boldAction = nullptr;
     QAction *m_italicAction = nullptr;
     QAction *m_underlineAction = nullptr;
-    PageView::TextStyle m_textBoxStyle; // what the toolbar means for NEW text boxes
+    PageView::TextStyle m_textBoxStyle;
     ReconstructionController *m_reconstruction = nullptr;
 
     std::unique_ptr<PdfEditor> m_editor;
