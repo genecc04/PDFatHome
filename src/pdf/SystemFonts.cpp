@@ -64,7 +64,7 @@ inline SfntInfo readSfntInfo(const unsigned char *data, size_t size)
             info.hasOs2 = true;
             info.weightClass = int(be16(table + 4));
             info.fsType = int(be16(table + 8));
-            info.italic = (be16(table + 62) & 1) != 0;
+            info.italic = (be16(table + 62) & 0x0201) != 0;
         }
     }
     return info;
@@ -76,7 +76,7 @@ inline SfntInfo readSfntInfo(const unsigned char *data, size_t size)
 
 namespace {
 
-QByteArray readFontFile(HDC dc, const QString &family, bool bold, bool italic)
+EmbeddableFont readFontFile(HDC dc, const QString &family, bool bold, bool italic)
 {
     wchar_t actual[LF_FACESIZE] = {};
     if (GetTextFaceW(dc, LF_FACESIZE, actual) == 0
@@ -99,17 +99,17 @@ QByteArray readFontFile(HDC dc, const QString &family, bool bold, bool italic)
         return {};
     if (info.fsType & 0x0200)
         return {};
-    if (bold && info.weightClass < 600)
-        return {};
-    if (italic && !info.italic)
-        return {};
 
-    return data;
+    EmbeddableFont result;
+    result.data = data;
+    result.syntheticBold = bold && info.weightClass < 600;
+    result.syntheticItalic = italic && !info.italic;
+    return result;
 }
 
 }
 
-QByteArray embeddableFontFile(const QString &family, bool bold, bool italic)
+EmbeddableFont embeddableFontFile(const QString &family, bool bold, bool italic)
 {
     if (family.isEmpty() || family.size() >= LF_FACESIZE)
         return {};
@@ -126,7 +126,7 @@ QByteArray embeddableFontFile(const QString &family, bool bold, bool italic)
     wanted.lfOutPrecision = OUT_TT_ONLY_PRECIS;
     family.toWCharArray(wanted.lfFaceName);
 
-    QByteArray result;
+    EmbeddableFont result;
     HFONT font = CreateFontIndirectW(&wanted);
     HGDIOBJ previous = font ? SelectObject(dc, font) : nullptr;
     if (previous)
@@ -142,7 +142,7 @@ QByteArray embeddableFontFile(const QString &family, bool bold, bool italic)
 
 #else
 
-QByteArray embeddableFontFile(const QString &, bool, bool)
+EmbeddableFont embeddableFontFile(const QString &, bool, bool)
 {
     return {};
 }

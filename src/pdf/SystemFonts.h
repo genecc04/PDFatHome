@@ -5,6 +5,13 @@
 
 namespace SystemFonts {
 
-QByteArray embeddableFontFile(const QString &family, bool bold, bool italic);
+struct EmbeddableFont
+{
+    QByteArray data;
+    bool syntheticBold = false;
+    bool syntheticItalic = false;
+};
+
+EmbeddableFont embeddableFontFile(const QString &family, bool bold, bool italic);
 
 }

@@ -1,6 +1,6 @@
 # PDF@home
 
-**Version 1.2.0**
+**Version 1.3.0**
 
 A desktop PDF reader and editor for Windows, built with C++, Qt 6, MuPDF and Tesseract.
 MuPDF handles PDF loading, rendering, search and editing; Qt provides the user
@@ -48,7 +48,7 @@ Get PDF@home from the [Microsoft Store](https://apps.microsoft.com/detail/9P25R3
 Or get either file from the
 [Releases page](https://github.com/genecc04/PDFatHome/releases):
 
-- **`PDFhome-Setup-1.0.exe`** (installer): run it and follow the prompts. It adds a Start
+- **`PDFhome-Setup-1.3.0.exe`** (installer): run it and follow the prompts. It adds a Start
   menu entry and an uninstaller.
 - **`PDFhome-windows.zip`** (portable): unzip it anywhere and run `PDF@home.exe`. No
   installation is needed.
@@ -65,8 +65,9 @@ deploys the MSVC runtime alongside the application. If you build or repackage th
 without those runtime files, install the
 [Microsoft Visual C++ Redistributable (x64)](https://learn.microsoft.com/cpp/windows/latest-supported-vc-redist).
 
-Uninstalling removes the program files. Settings and saved e-signatures stored in your
-user profile are not part of the installation.
+Uninstalling removes the program files. Settings, saved e-signatures, and the local
+diagnostic log stored in your user profile are not part of the installation. See
+[PRIVACY.md](PRIVACY.md) for what the app stores on your device.
 
 ## Keyboard shortcuts
 
@@ -173,9 +174,9 @@ cmake --build build --config Debug
 ### Packaging a release
 
 Releases are built by [GitHub Actions](.github/workflows/ci.yml). Pushing a tag such as
-`v1.0` builds in Release mode, stages the program with the Qt and MSVC runtimes, the
+`v1.3.0` builds in Release mode, stages the program with the Qt and MSVC runtimes, the
 OCR language data, the README, and the license materials (including the copyright file
-of every vcpkg library in the build), and publishes `PDFhome-Setup-1.0.exe` (an
+of every vcpkg library in the build), and publishes `PDFhome-Setup-1.3.0.exe` (an
 [Inno Setup](https://jrsoftware.org/isinfo.php) installer, see
 [installer/PDFhome.iss](installer/PDFhome.iss)) and `PDFhome-windows.zip` (portable) on
 the Releases page. Keep the tag and the `VERSION` in `CMakeLists.txt` in sync; the

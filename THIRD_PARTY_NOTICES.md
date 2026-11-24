@@ -164,6 +164,17 @@ is not identified here as third-party material.
   the same `LICENSE`, `THIRD_PARTY_NOTICES.md`, and `licenses/` folder. The installer
   must install these notices alongside the program, and the Qt DLLs must remain
   separate files that can be replaced with compatible modified versions.
+- The MSIX package (`PDFhome.msix`, built for Microsoft Store submission and not
+  attached to the GitHub Release) is staged from the same folder as the installer, so
+  it should carry the same program files, `LICENSE`, `THIRD_PARTY_NOTICES.md`, and
+  `licenses/` folder. Check this in the built package. The package also declares
+  Microsoft's C++ runtime framework package (`Microsoft.VCLibs.140.00.UWPDesktop`) as a
+  dependency; the Store installs it, and it is not bundled in the package.
+- Microsoft Store listing: the Store applies its own default license terms to an app
+  unless the listing supplies the developer's own, and those defaults can conflict with
+  the rights the AGPL gives users. Put the project's license terms (the AGPL, see
+  `LICENSE`) in the Store listing, and link the project's source repository (the exact
+  tagged commit for each release) and the privacy policy there.
 - For each release, link the exact tagged source commit in the release notes (or
   attach a source archive) and keep the build instructions in `README.md` accurate
   for that tag, so the corresponding source for the AGPL-licensed components

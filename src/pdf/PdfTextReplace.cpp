@@ -119,13 +119,22 @@ QByteArray buildContent(const fz_matrix &inverse,
         if (bytes.trimmed().isEmpty())
             continue;
 
-        const fz_matrix tm = fz_concat(
+        fz_matrix tm = fz_concat(
             fz_make_matrix(1.0f, 0.0f, 0.0f, -1.0f, float(span.origin.x()),
                            float(span.origin.y())),
             inverse);
 
+        if (span.syntheticItalic)
+            tm = fz_concat(fz_make_matrix(1.0f, 0.0f, 0.21f, 1.0f, 0.0f, 0.0f), tm);
+
+        if (span.syntheticBold) {
+            out += num(span.sizePoints * 0.03) + " w\n";
+            out += colorOps(span.color, "RG");
+        }
+
         out += "BT\n/" + resourceNameFor(span) + ' ' + num(span.sizePoints) + " Tf\n";
-        out += "0 Tc 0 Tw 100 Tz 0 Tr 0 Ts\n";
+        out += span.syntheticBold ? "0 Tc 0 Tw 100 Tz 2 Tr 0 Ts\n"
+                                  : "0 Tc 0 Tw 100 Tz 0 Tr 0 Ts\n";
         out += colorOps(span.color, "rg");
         out += num(tm.a) + ' ' + num(tm.b) + ' ' + num(tm.c) + ' ' + num(tm.d) + ' '
              + num(tm.e) + ' ' + num(tm.f) + " Tm\n";

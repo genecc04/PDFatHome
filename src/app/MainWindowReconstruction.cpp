@@ -150,7 +150,7 @@ void MainWindow::applyReconstruction()
     overlay->reset();
 
     constexpr bool kEmbedSystemFonts = true;
-    QHash<QString, QByteArray> fontFiles;
+    QHash<QString, SystemFonts::EmbeddableFont> fonts;
     QStringList notEmbedded;
 
     QMap<int, QVector<PdfEditor::TextReplacement>> byPage;
@@ -185,15 +185,17 @@ void MainWindow::applyReconstruction()
                                         .arg(piece.systemFamily)
                                         .arg(int(piece.bold))
                                         .arg(int(piece.italic));
-                auto found = fontFiles.find(key);
-                if (found == fontFiles.end()) {
-                    found = fontFiles.insert(key, SystemFonts::embeddableFontFile(
-                                                      piece.systemFamily, piece.bold,
-                                                      piece.italic));
+                auto found = fonts.find(key);
+                if (found == fonts.end()) {
+                    found = fonts.insert(key, SystemFonts::embeddableFontFile(
+                                                  piece.systemFamily, piece.bold,
+                                                  piece.italic));
                 }
-                if (!found.value().isEmpty()) {
-                    span.fontFile = found.value();
+                if (!found.value().data.isEmpty()) {
+                    span.fontFile = found.value().data;
                     span.fontKey = key;
+                    span.syntheticBold = found.value().syntheticBold;
+                    span.syntheticItalic = found.value().syntheticItalic;
                 } else if (!notEmbedded.contains(piece.systemFamily)) {
                     notEmbedded << piece.systemFamily;
                 }
@@ -242,8 +244,9 @@ void MainWindow::applyReconstruction()
         message += QString(" %1 character(s) can't be shown in the standard PDF fonts and "
                            "were replaced with \"?\".").arg(unsupported);
     if (!notEmbedded.isEmpty())
-        message += QString(" %1 can't be embedded in a PDF (variable, OpenType/CFF or "
-                           "restricted font), so a standard PDF font was used instead.")
+        message += QString(" %1 can't be embedded in a PDF (variable, OpenType/CFF, "
+                           "collection or restricted font), so a standard PDF font was "
+                           "used instead.")
                        .arg(notEmbedded.join(QStringLiteral(", ")));
     statusBar()->showMessage(message, 8000);
 }

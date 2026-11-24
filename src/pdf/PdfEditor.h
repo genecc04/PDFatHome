@@ -171,6 +171,9 @@ public:
 
         QByteArray fontFile;
         QString fontKey;
+
+        bool syntheticBold = false;
+        bool syntheticItalic = false;
     };
 
     struct TextReplacement {
