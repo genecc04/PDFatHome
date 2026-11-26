@@ -13,6 +13,7 @@
 #include <QUrl>
 #include <functional>
 #include <memory>
+#include <utility>
 #include <vector>
 
 struct fz_context;
@@ -90,24 +91,131 @@ public:
         bool selfSignedCertificate = false;
     };
 
+    struct TextBoxRun {
+        QString text;
+        QString family = QStringLiteral("Helvetica");
+        double sizePoints = 12.0;
+        QColor color = QColor(0, 0, 0);
+        bool bold = false;
+        bool italic = false;
+        bool underline = false;
+
+        bool sameFormat(const TextBoxRun &other) const
+        {
+            return family == other.family && qFuzzyCompare(sizePoints, other.sizePoints)
+                   && color == other.color && bold == other.bold
+                   && italic == other.italic && underline == other.underline;
+        }
+    };
+
+    struct TextBoxContent {
+        QVector<TextBoxRun> runs;
+        int alignment = 0;
+
+        static bool onlyNewlines(const QString &text)
+        {
+            for (const QChar ch : text) {
+                if (ch != QLatin1Char('\n'))
+                    return false;
+            }
+            return true;
+        }
+
+        QString plainText() const
+        {
+            QString text;
+            for (const TextBoxRun &run : runs)
+                text += run.text;
+            return text;
+        }
+
+        TextBoxRun leadingRun() const
+        {
+            for (const TextBoxRun &run : runs) {
+                if (!run.text.trimmed().isEmpty())
+                    return run;
+            }
+            return runs.isEmpty() ? TextBoxRun() : runs.first();
+        }
+
+        bool isUniform() const
+        {
+            const TextBoxRun *reference = nullptr;
+            for (const TextBoxRun &run : runs) {
+                if (onlyNewlines(run.text))
+                    continue;
+                if (!reference)
+                    reference = &run;
+                else if (!reference->sameFormat(run))
+                    return false;
+            }
+            return true;
+        }
+
+        void normalize()
+        {
+            QVector<TextBoxRun> merged;
+            for (const TextBoxRun &run : std::as_const(runs)) {
+                if (run.text.isEmpty())
+                    continue;
+                if (!merged.isEmpty() && merged.last().sameFormat(run))
+                    merged.last().text += run.text;
+                else
+                    merged.append(run);
+            }
+            runs = merged;
+        }
+
+        void trim()
+        {
+            normalize();
+            while (!runs.isEmpty()) {
+                QString &text = runs.first().text;
+                int skip = 0;
+                while (skip < text.size() && text.at(skip).isSpace())
+                    ++skip;
+                text.remove(0, skip);
+                if (!text.isEmpty())
+                    break;
+                runs.remove(0);
+            }
+            while (!runs.isEmpty()) {
+                QString &text = runs.last().text;
+                while (!text.isEmpty() && text.at(text.size() - 1).isSpace())
+                    text.chop(1);
+                if (!text.isEmpty())
+                    break;
+                runs.removeLast();
+            }
+        }
+
+        bool sameAs(const TextBoxContent &other) const
+        {
+            TextBoxContent a = *this;
+            TextBoxContent b = other;
+            a.normalize();
+            b.normalize();
+            if (a.alignment != b.alignment || a.runs.size() != b.runs.size())
+                return false;
+            for (int i = 0; i < int(a.runs.size()); ++i) {
+                if (a.runs.at(i).text != b.runs.at(i).text
+                    || !a.runs.at(i).sameFormat(b.runs.at(i)))
+                    return false;
+            }
+            return true;
+        }
+    };
+
     PdfEditor();
     ~PdfEditor();
 
     PdfEditor(const PdfEditor &) = delete;
     PdfEditor &operator=(const PdfEditor &) = delete;
-    bool addTextBox(int pageIndex, const QRectF &box, const QString &text,
-                const QString &fontName, double fontSize,
-                float red, float green, float blue, bool underline = false,
-                int alignment = 0);
+    bool addTextBox(int pageIndex, const QRectF &box, const TextBoxContent &content);
     bool textAnnotationAt(int pageIndex, const QPointF &point,
-                          int *annotationId, QRectF *bounds, QString *text,
-                          QString *fontName, double *fontSize, QColor *color,
-                          bool *underline = nullptr, int *alignment = nullptr);
+                          int *annotationId, QRectF *bounds, TextBoxContent *content);
     bool updateTextAnnotation(int pageIndex, int annotationId,
-                              const QString &oldText, const QString &newText,
-                              const QString &fontName, double fontSize,
-                              float red, float green, float blue, bool underline = false,
-                              int alignment = 0);
+                              const QString &oldText, const TextBoxContent &content);
     bool setTextAnnotationBounds(int pageIndex, int annotationId, const QString &text,
                                  const QRectF &bounds);
     bool deleteTextAnnotation(int pageIndex, int annotationId, const QString &text);

@@ -127,6 +127,21 @@ namespace {
 
 }
 
+QString MainWindow::initialDialogDirectory() const
+{
+    const QStringList recentFiles = QSettings().value("recentFiles").toStringList();
+    for (const QString &recentFile : recentFiles) {
+        const QFileInfo info(recentFile);
+        if (info.exists() && info.isFile())
+            return info.absolutePath();
+    }
+
+    QString directory = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
+    if (directory.isEmpty())
+        directory = QDir::homePath();
+    return directory;
+}
+
 void MainWindow::openFile()
 {
     if (m_documentLoadPending)
@@ -135,23 +150,8 @@ void MainWindow::openFile()
     if (!confirmDiscard())
         return;
 
-    QString initialDirectory;
-    const QStringList recentFiles = QSettings().value("recentFiles").toStringList();
-    for (const QString &recentFile : recentFiles) {
-        const QFileInfo info(recentFile);
-        if (info.exists() && info.isFile()) {
-            initialDirectory = info.absolutePath();
-            break;
-        }
-    }
-    if (initialDirectory.isEmpty()) {
-        initialDirectory = QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation);
-        if (initialDirectory.isEmpty())
-            initialDirectory = QDir::homePath();
-    }
-
     const QString path = QFileDialog::getOpenFileName(
-        this, "Open PDF", initialDirectory, "PDF files (*.pdf)");
+        this, "Open PDF", initialDialogDirectory(), "PDF files (*.pdf)");
     if (path.isEmpty())
         return;
 
@@ -540,7 +540,7 @@ bool MainWindow::saveAs()
         return false;
 
     const QString dest = QFileDialog::getSaveFileName(
-        this, "Save PDF As", QString(), "PDF files (*.pdf)");
+        this, "Save PDF As", initialDialogDirectory(), "PDF files (*.pdf)");
     if (dest.isEmpty())
         return false;
 
@@ -590,8 +590,8 @@ void MainWindow::optimizePdf()
     if (!m_editor)
         return;
 
-    const QString defaultName =
-        QFileInfo(m_currentPath).completeBaseName() + "-optimized.pdf";
+    const QString defaultName = QDir(initialDialogDirectory()).filePath(
+        QFileInfo(m_currentPath).completeBaseName() + "-optimized.pdf");
     const QString dest = QFileDialog::getSaveFileName(
         this, "Save optimized PDF copy", defaultName, "PDF files (*.pdf)");
     if (dest.isEmpty())

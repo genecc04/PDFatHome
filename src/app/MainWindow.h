@@ -110,6 +110,7 @@ private:
     PdfEditor::Encryption saveEncryption() const;
     bool openWorkingCopy(const QString &source, int page);
     void updateRecentMenu();
+    QString initialDialogDirectory() const;
     void showAbout();
 
     // editing
@@ -119,14 +120,12 @@ private:
     void extractPages();
     void insertPages();
     void highlightText();
-    void placeText(int page, const QRectF &box, const QString &text,
-                   const PageView::TextStyle &style);
-    void updateTextAnnotation(int page, int annotationId,
-                              const QString &oldText, const QString &newText,
-                              const PageView::TextStyle &style);
+    void placeText(int page, const QRectF &box, const PdfEditor::TextBoxContent &content);
+    void updateTextAnnotation(int page, int annotationId, const QString &oldText,
+                              const PdfEditor::TextBoxContent &content);
     void updateTextAnnotationBounds(int page, int annotationId, const QString &text,
                                     const QRectF &oldBounds, const QRectF &newBounds,
-                                    const PageView::TextStyle &style);
+                                    const PdfEditor::TextBoxContent &content);
     void deleteTextAnnotation(int page, int annotationId, const QString &text);
     void updateImageStampBounds(int page, const QString &id, const QRectF &oldBounds,
                                 const QRectF &newBounds);

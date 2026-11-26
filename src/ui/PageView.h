@@ -29,6 +29,8 @@ class QComboBox;
 class QLineEdit;
 class QPainterPath;
 class QPlainTextEdit;
+class QTextCharFormat;
+class QTextEdit;
 class QPushButton;
 class SearchResultModel;
 class QTimer;
@@ -39,6 +41,8 @@ class PageView : public QAbstractScrollArea
     Q_OBJECT
 public:
     enum class ZoomMode { Custom, FitToWidth, FitInView };
+
+    enum class TextProperty { Family, Size, Color, Bold, Italic, Underline, Alignment };
 
     struct TextStyle {
         QString family = QStringLiteral("Helvetica");
@@ -108,13 +112,14 @@ public:
 
     void setTextToolActive(bool active);
     void setTextStyle(const TextStyle &style);
+    bool applyTextFormatChange(const TextStyle &style, TextProperty property);
     void setFormFieldHandler(
         const std::function<bool(int, const QPointF &, FormField *)> &handler);
     void setFormFieldValueHandler(
         const std::function<bool(int, int, const QString &)> &handler);
     void setTextAnnotationHandler(
-        const std::function<bool(int, const QPointF &, int *, QRectF *, QString *,
-                                 TextStyle *)> &handler);
+        const std::function<bool(int, const QPointF &, int *, QRectF *,
+                                 PdfEditor::TextBoxContent *)> &handler);
     void setImageStampHandler(
         const std::function<bool(int, const QPointF &, PdfEditor::ImageStamp *)> &handler);
     void refreshSelectedTextAnnotation();
@@ -151,8 +156,8 @@ public:
     void preserveCommittedStrokes(const QVector<PageView::Stroke> &strokes);
     void preserveErasedStrokes(int page, const QVector<PageView::Stroke> &strokes);
     void preserveTextAnnotationChange(int page, const QRectF &oldBounds,
-                                      const QRectF &newBounds, const QString &text,
-                                      const PageView::TextStyle &style);
+                                      const QRectF &newBounds,
+                                      const PdfEditor::TextBoxContent &content);
 
     bool hasTextSelection() const { return !m_selection.isEmpty(); }
     void copySelection();
@@ -162,22 +167,23 @@ public:
 signals:
     void currentPageChanged(int page);
     void visiblePageRangeChanged(int firstPage, int lastPage);
-    void textPlaced(int page, const QRectF &boxPoints, const QString &text,
-                    const PageView::TextStyle &style);
+    void textPlaced(int page, const QRectF &boxPoints,
+                    const PdfEditor::TextBoxContent &content);
     void textToolFinished();
     void strokesPlaced(const QVector<PageView::Stroke> &strokes);
     void eraseRequested(int page, const QVector<QPointF> &path, double radius);
     void pendingStrokesChanged();
     void pendingChangesChanged();
     void textAnnotationEditRequested(int page, int annotationId, const QString &text);
-    void textAnnotationEditingStyleChanged(const PageView::TextStyle &style);
-    void textAnnotationEdited(int page, int annotationId,
-                              const QString &oldText, const QString &newText,
-                              const PageView::TextStyle &style);
+    void textEditorFormatChanged(const PageView::TextStyle &style);
+    void textEditorClosed();
+    void selectedTextAnnotationStyleChanged(const PageView::TextStyle &style);
+    void textAnnotationEdited(int page, int annotationId, const QString &oldText,
+                              const PdfEditor::TextBoxContent &content);
     void textAnnotationDeleteRequested(int page, int annotationId, const QString &text);
     void textAnnotationBoundsChanged(int page, int annotationId, const QString &text,
                                      const QRectF &oldBounds, const QRectF &newBounds,
-                                     const PageView::TextStyle &style);
+                                     const PdfEditor::TextBoxContent &content);
     void textAnnotationSelectionChanged(bool selected);
     void imageStampBoundsChanged(int page, const QString &id,
                                  const QRectF &oldBounds, const QRectF &newBounds);
@@ -212,6 +218,7 @@ protected:
 
 private:
     enum class ImageDrag { None, Move, Resize };
+    enum class EditorDrag { None, Move, Resize };
     friend class ReconstructionOverlay;
 
     struct ErasePreviewStroke {
@@ -224,8 +231,7 @@ private:
         int page = -1;
         QRectF oldBounds;
         QRectF newBounds;
-        QString text;
-        TextStyle style;
+        PdfEditor::TextBoxContent content;
     };
 
     struct ImageStampPreview {
@@ -303,8 +309,8 @@ private:
     void drawSelectionHighlight(QPainter &painter, int page, const QRect &target);
     void drawTextAnnotationPreview(QPainter &painter, int page, const QRect &target,
                                    qreal dpr, const QRectF &oldBounds,
-                                   const QRectF &newBounds, const QString &text,
-                                   const TextStyle &style);
+                                   const QRectF &newBounds,
+                                   const PdfEditor::TextBoxContent &content);
     void drawImageStampPreview(QPainter &painter, int page, const QRect &target,
                                qreal dpr, const QRectF &oldBounds,
                                const QRectF &newBounds, const QImage &image);
@@ -312,11 +318,26 @@ private:
     QRectF pageToViewport(const QRect &target, const QRectF &pageBounds) const;
     void finishPendingRasterPreview(int page, const QSize &tilePageSize = {});
 
-    void startEditor(int page, const QRectF &boxPoints);
+    void startEditor(int page, const QRectF &boxPoints,
+                     const PdfEditor::TextBoxContent &initial = PdfEditor::TextBoxContent());
     void startAnnotationEditor(int page, int annotationId, const QRectF &boxPoints,
-                               const QString &text, const TextStyle &style);
+                               const PdfEditor::TextBoxContent &content);
     void positionEditor();
+    void positionEditorHandles();
+    void destroyEditorHandles();
+    bool handleEditorHandleEvent(QObject *watched, QEvent *event);
+    void dragEditorBox(const QPointF &delta);
     void applyEditorStyle();
+    void updateEditorBackground();
+    void rebuildEditorDocument();
+    PdfEditor::TextBoxContent editorContent() const;
+    void emitEditorFormat();
+    void applyEditorFormat(const QTextCharFormat &change);
+    void applyEditorProperty(const TextStyle &style, TextProperty property);
+    void toggleEditorFormat(int which);
+    void setEditorAlignment(Qt::AlignmentFlag alignment);
+    bool canRestyleSelectedTextAnnotation() const;
+    void applySelectedTextAnnotationProperty(const TextStyle &style, TextProperty property);
     void finishEditor(bool commit);
     void startFormEditor(int page, const FormField &field);
     void positionFormEditor();
@@ -339,7 +360,7 @@ private:
     void extendSelection(const QPoint &viewportPos);
     void selectWordAt(int page, const QPointF &point);
     void selectTextAnnotation(int page, int annotationId, const QRectF &bounds,
-                              const QString &text, const TextStyle &style);
+                              const PdfEditor::TextBoxContent &content);
     void clearSelectedTextAnnotation();
     QRectF selectedTextAnnotationViewportBounds() const;
     int textAnnotationResizeHandleAt(const QPoint &pos) const;
@@ -395,15 +416,27 @@ private:
     bool m_dragging = false;
     QPoint m_dragStart;
     QRect m_dragRect;
-    QPlainTextEdit *m_editor = nullptr;
+    QTextEdit *m_editor = nullptr;
     int m_editorPage = -1;
     QRectF m_editorBox;
     TextStyle m_style;
-    TextStyle m_editorStyle;
     bool m_editingTextAnnotation = false;
     int m_editingTextAnnotationId = 0;
     QString m_editingTextAnnotationOriginal;
-    bool m_editingTextAnnotationStyleChanged = false;
+    PdfEditor::TextBoxContent m_editingTextAnnotationOriginalContent;
+    PdfEditor::TextBoxContent m_editorInitial;
+    PdfEditor::TextBoxRun m_editorTyping;
+    Qt::AlignmentFlag m_editorAlignment = Qt::AlignLeft;
+    double m_editorScale = 0.0;
+    QString m_editorBackground;
+    bool m_editorRebuilding = false;
+    QRectF m_editorOriginalBox;
+    QWidget *m_editorMoveHandle = nullptr;
+    QWidget *m_editorResizeHandles[4] = {};
+    EditorDrag m_editorDrag = EditorDrag::None;
+    int m_editorResizeCorner = -1;
+    QPointF m_editorDragStartMouse;
+    QRectF m_editorDragStartBox;
 
     // draw tool
     bool m_drawTool = false;
@@ -469,8 +502,8 @@ private:
     QTimer *m_autoScroll = nullptr;
     std::function<bool(int, const QPointF &, FormField *)> m_formFieldHandler;
     std::function<bool(int, int, const QString &)> m_formFieldValueHandler;
-    std::function<bool(int, const QPointF &, int *, QRectF *, QString *,
-                       TextStyle *)>
+    std::function<bool(int, const QPointF &, int *, QRectF *,
+                       PdfEditor::TextBoxContent *)>
         m_textAnnotationHandler;
     std::function<bool(int, const QPointF &, PdfEditor::ImageStamp *)>
         m_imageStampHandler;
@@ -478,7 +511,7 @@ private:
     int m_selectedTextAnnotationPage = -1;
     QRectF m_selectedTextAnnotationBounds;
     QString m_selectedTextAnnotationContents;
-    TextStyle m_selectedTextAnnotationStyle;
+    PdfEditor::TextBoxContent m_selectedTextAnnotationContent;
     bool m_resizingTextAnnotation = false;
     bool m_movingTextAnnotation = false;
     int m_textAnnotationResizeCorner = -1;

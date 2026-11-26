@@ -433,15 +433,6 @@ namespace {
                          Qt::AlignCenter, text);
         return trimSignatureImage(image);
     }
-    QString annotationFontName(const PageView::TextStyle &style)
-    {
-        return AnnotationFonts::pdfName(style.family, style.bold, style.italic);
-    }
-
-    int annotationAlignment(const PageView::TextStyle &style)
-    {
-        return AnnotationFonts::alignmentCode(style.alignment);
-    }
 }
 
 QList<int> MainWindow::targetPages() const
@@ -550,7 +541,7 @@ void MainWindow::extractPages()
         return;
 
     const QString dest = QFileDialog::getSaveFileName(
-        this, "Save extracted pages as", QString(), "PDF files (*.pdf)");
+        this, "Save extracted pages as", initialDialogDirectory(), "PDF files (*.pdf)");
     if (dest.isEmpty())
         return;
 
@@ -585,8 +576,8 @@ void MainWindow::exportPages(const QString &format)
         return;
 
     const QString fileType = format.toUpper();
-    const QString defaultName =
-        QFileInfo(m_currentPath).completeBaseName() + QLatin1Char('.') + format;
+    const QString defaultName = QDir(initialDialogDirectory()).filePath(
+        QFileInfo(m_currentPath).completeBaseName() + QLatin1Char('.') + format);
     const QString selectedPath = QFileDialog::getSaveFileName(
         this, QString("Choose a filename for %1 export (multi-page exports are numbered)")
                     .arg(fileType),
@@ -659,7 +650,7 @@ void MainWindow::insertPages()
         return;
 
     const QString source = QFileDialog::getOpenFileName(
-        this, "Choose the PDF to insert", QString(), "PDF files (*.pdf)");
+        this, "Choose the PDF to insert", initialDialogDirectory(), "PDF files (*.pdf)");
     if (source.isEmpty())
         return;
 
@@ -741,34 +732,30 @@ void MainWindow::highlightText()
             QString("Highlighted text on %1 page(s)").arg(changedPages.size()), 4000);
 }
 
-void MainWindow::placeText(int page, const QRectF &box, const QString &text,
-                           const PageView::TextStyle &style)
+void MainWindow::placeText(int page, const QRectF &box,
+                           const PdfEditor::TextBoxContent &content)
 {
     if (!m_editor)
         return;
     EditOperationGuard operation(this);
 
-    if (!m_editor->addTextBox(page, box, text, annotationFontName(style),
-                              style.sizePoints, style.color.redF(),
-                              style.color.greenF(), style.color.blueF(),
-                              style.underline, annotationAlignment(style))) {
+    if (!m_editor->addTextBox(page, box, content)) {
         QMessageBox::warning(this, "Add text failed", m_editor->lastError());
         reopenEditor(m_history.current());
         updateActions();
         return;
     }
     if (refreshAfterPageEdit({ page }, page))
-        m_view->preserveTextAnnotationChange(page, {}, box, text, style);
+        m_view->preserveTextAnnotationChange(page, {}, box, content);
 }
 
-void MainWindow::updateTextAnnotation(int page, int annotationId,
-                                      const QString &oldText, const QString &newText,
-                                      const PageView::TextStyle &style)
+void MainWindow::updateTextAnnotation(int page, int annotationId, const QString &oldText,
+                                      const PdfEditor::TextBoxContent &content)
 {
     if (!m_editor)
         return;
 
-    if (newText.trimmed().isEmpty()) {
+    if (content.plainText().trimmed().isEmpty()) {
         QMessageBox::warning(this, "Edit added text",
                              "Text cannot be empty. Use Delete added text to remove it.");
         m_view->editTextAnnotationInline(page, annotationId, oldText);
@@ -776,11 +763,7 @@ void MainWindow::updateTextAnnotation(int page, int annotationId,
     }
 
     EditOperationGuard operation(this);
-    if (!m_editor->updateTextAnnotation(page, annotationId, oldText, newText,
-                                        annotationFontName(style), style.sizePoints,
-                                        style.color.redF(), style.color.greenF(),
-                                        style.color.blueF(), style.underline,
-                                        annotationAlignment(style))) {
+    if (!m_editor->updateTextAnnotation(page, annotationId, oldText, content)) {
         QMessageBox::warning(this, "Edit added text", m_editor->lastError());
         reopenEditor(m_history.current());
         updateActions();
@@ -789,7 +772,7 @@ void MainWindow::updateTextAnnotation(int page, int annotationId,
     if (refreshAfterPageEdit({ page }, page))
         m_view->preserveTextAnnotationChange(
             page, m_view->selectedTextAnnotationBounds(),
-            m_view->selectedTextAnnotationBounds(), newText, style);
+            m_view->selectedTextAnnotationBounds(), content);
 }
 
 void MainWindow::deleteTextAnnotation(int page, int annotationId, const QString &text)
@@ -812,7 +795,7 @@ void MainWindow::updateTextAnnotationBounds(int page, int annotationId,
                                             const QString &text,
                                             const QRectF &oldBounds,
                                             const QRectF &bounds,
-                                            const PageView::TextStyle &style)
+                                            const PdfEditor::TextBoxContent &content)
 {
     if (!m_editor)
         return;
@@ -825,7 +808,7 @@ void MainWindow::updateTextAnnotationBounds(int page, int annotationId,
         return;
     }
     if (refreshAfterPageEdit({ page }, page))
-        m_view->preserveTextAnnotationChange(page, oldBounds, bounds, text, style);
+        m_view->preserveTextAnnotationChange(page, oldBounds, bounds, content);
 }
 
 void MainWindow::updateImageStampBounds(int page, const QString &id,
@@ -869,7 +852,7 @@ void MainWindow::addImage()
         return;
 
     const QString path = QFileDialog::getOpenFileName(
-        this, "Choose an image", QString(),
+        this, "Choose an image", initialDialogDirectory(),
         "Images (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff);;All files (*)");
     if (path.isEmpty())
         return;

@@ -219,27 +219,11 @@ void MainWindow::setupViewer()
             return commitFormField(page, widgetIndex, value);
         });
     m_view->setTextAnnotationHandler(
-        [this](int page, const QPointF &point, int *annotationId,
-               QRectF *bounds, QString *text, PageView::TextStyle *style) {
-            QString fontName;
-            double fontSize = 12.0;
-            QColor color;
-            bool underline = false;
-            int alignment = 0;
-            if (!m_editor || m_viewOnly
-                || !m_editor->textAnnotationAt(page, point, annotationId, bounds, text,
-                                               &fontName, &fontSize, &color, &underline,
-                                               &alignment))
-                return false;
-
-            style->family = AnnotationFonts::family(fontName);
-            style->bold = AnnotationFonts::isBold(fontName);
-            style->italic = AnnotationFonts::isItalic(fontName);
-            style->underline = underline;
-            style->alignment = AnnotationFonts::alignmentFromCode(alignment);
-            style->sizePoints = fontSize;
-            style->color = color;
-            return true;
+        [this](int page, const QPointF &point, int *annotationId, QRectF *bounds,
+               PdfEditor::TextBoxContent *content) {
+            return m_editor && !m_viewOnly
+                   && m_editor->textAnnotationAt(page, point, annotationId, bounds,
+                                                 content);
         });
     m_view->setImageStampHandler(
         [this](int page, const QPointF &point, PdfEditor::ImageStamp *stamp) {
@@ -884,7 +868,7 @@ void MainWindow::setupToolsPane()
     auto *textBoxSection = new QGroupBox("Added text box");
     auto *textBoxLayout = new QVBoxLayout(textBoxSection);
     auto *textBoxHint = new QLabel(
-        "Click a text box you added to select it. Double-click it to edit its text.");
+        "Click a text box you added to select it.");
     textBoxHint->setWordWrap(true);
     textBoxLayout->addWidget(textBoxHint);
     textBoxLayout->addWidget(actionButton(m_deleteTextAction, "Delete selected text box"));
@@ -893,10 +877,7 @@ void MainWindow::setupToolsPane()
     auto *reconstructSection = new QGroupBox("Reconstruct");
     auto *reconstructLayout = new QVBoxLayout(reconstructSection);
     auto *reconstructHint = new QLabel(
-        "Click a text region on the page to edit it. Drag the square corners of its box to "
-        "resize it and the orange tab to move it; the red tab (or Delete text box) deletes "
-        "it. Edits wait until you apply them. The text options above work while a region is "
-        "open (in a text box you added, with nothing selected they style all of its text).");
+        "Click a text region on the page to edit it.");
     reconstructHint->setWordWrap(true);
     reconstructLayout->addWidget(reconstructHint);
 
@@ -1027,8 +1008,7 @@ void MainWindow::setupToolsPane()
     auto *imageLayout = new QVBoxLayout(imageGroup);
 
     auto *imageHint = new QLabel(
-        "Drag the image to move it, or a corner to resize it. Crop works on an image you "
-        "added earlier too. While placing: Enter places it and Esc cancels.");
+        "Drag the image to move it, or a corner to resize it.");
     imageHint->setWordWrap(true);
     imageLayout->addWidget(imageHint);
 
@@ -1151,7 +1131,8 @@ void MainWindow::setupToolsPane()
 
         const bool typing = reconstructing
                                 ? overlay->isEditing()
-                                : (m_addTextAction->isChecked() || m_view->isTextEditorOpen());
+                                : (m_addTextAction->isChecked() || m_view->isTextEditorOpen()
+                                   || m_view->hasSelectedTextAnnotation());
         textGroup->setEnabled(typing);
     };
 
@@ -1175,14 +1156,23 @@ void MainWindow::setupToolsPane()
     connect(overlay, &ReconstructionOverlay::editingChanged, this,
             [updatePane](bool) { updatePane(); });
 
-    auto applyTextBoxStyle = [this, checkedAlignment]() {
-        m_textBoxStyle.family = m_fontBox->currentText();
-        m_textBoxStyle.sizePoints = m_fontSizeBox->value();
-        m_textBoxStyle.color = m_textColorButton->color();
-        m_textBoxStyle.bold = m_boldAction->isChecked();
-        m_textBoxStyle.italic = m_italicAction->isChecked();
-        m_textBoxStyle.underline = m_underlineAction->isChecked();
-        m_textBoxStyle.alignment = checkedAlignment();
+    const auto styleFromControls = [this, checkedAlignment]() {
+        PageView::TextStyle style;
+        style.family = m_fontBox->currentText();
+        style.sizePoints = m_fontSizeBox->value();
+        style.color = m_textColorButton->color();
+        style.bold = m_boldAction->isChecked();
+        style.italic = m_italicAction->isChecked();
+        style.underline = m_underlineAction->isChecked();
+        style.alignment = checkedAlignment();
+        return style;
+    };
+
+    const auto applyTextBoxStyle = [this, styleFromControls](PageView::TextProperty property) {
+        const PageView::TextStyle style = styleFromControls();
+        if (m_view->applyTextFormatChange(style, property))
+            return;
+        m_textBoxStyle = style;
         m_view->setTextStyle(m_textBoxStyle);
     };
 
@@ -1203,7 +1193,9 @@ void MainWindow::setupToolsPane()
     };
 
     connect(m_fontBox, &QComboBox::currentTextChanged, this,
-            [applyTextBoxStyle](const QString &) { applyTextBoxStyle(); });
+            [applyTextBoxStyle](const QString &) {
+        applyTextBoxStyle(PageView::TextProperty::Family);
+    });
 
     connect(reconFontBox, &QComboBox::textActivated, this,
             [overlay](const QString &family) {
@@ -1215,39 +1207,39 @@ void MainWindow::setupToolsPane()
         if (overlay->isEditing())
             overlay->setFontSize(points);
         else
-            applyTextBoxStyle();
+            applyTextBoxStyle(PageView::TextProperty::Size);
     });
     connect(m_textColorButton, &ColorMenuButton::colorChanged, this,
             [overlay, applyTextBoxStyle](const QColor &color) {
         if (overlay->isEditing())
             overlay->setTextColor(color);
         else
-            applyTextBoxStyle();
+            applyTextBoxStyle(PageView::TextProperty::Color);
     });
     connect(m_boldAction, &QAction::toggled, this, [overlay, applyTextBoxStyle](bool on) {
         if (overlay->isEditing())
             overlay->setBold(on);
         else
-            applyTextBoxStyle();
+            applyTextBoxStyle(PageView::TextProperty::Bold);
     });
     connect(m_italicAction, &QAction::toggled, this, [overlay, applyTextBoxStyle](bool on) {
         if (overlay->isEditing())
             overlay->setItalic(on);
         else
-            applyTextBoxStyle();
+            applyTextBoxStyle(PageView::TextProperty::Italic);
     });
     connect(m_underlineAction, &QAction::toggled, this, [overlay, applyTextBoxStyle](bool on) {
         if (overlay->isEditing())
             overlay->setUnderlined(on);
         else
-            applyTextBoxStyle();
+            applyTextBoxStyle(PageView::TextProperty::Underline);
     });
     connect(alignGroup, &QActionGroup::triggered, this,
             [overlay, applyTextBoxStyle, checkedAlignment](QAction *) {
         if (overlay->isEditing())
             overlay->setAlignment(checkedAlignment());
         else
-            applyTextBoxStyle();
+            applyTextBoxStyle(PageView::TextProperty::Alignment);
     });
 
     connect(overlay, &ReconstructionOverlay::formatChanged, this,
@@ -1280,8 +1272,7 @@ void MainWindow::setupToolsPane()
                                   : QStringLiteral("No edits waiting."));
     });
 
-    connect(m_view, &PageView::textAnnotationEditingStyleChanged, this,
-            [this, showAlignment](const PageView::TextStyle &style) {
+    const auto showAnnotationStyle = [this, showAlignment](const PageView::TextStyle &style) {
         const QSignalBlocker fontBlocker(m_fontBox);
         const QSignalBlocker sizeBlocker(m_fontSizeBox);
         const QSignalBlocker colorBlocker(m_textColorButton);
@@ -1295,6 +1286,18 @@ void MainWindow::setupToolsPane()
         m_italicAction->setChecked(style.italic);
         m_underlineAction->setChecked(style.underline);
         showAlignment(style.alignment);
+    };
+    connect(m_view, &PageView::textEditorFormatChanged, this, showAnnotationStyle);
+    connect(m_view, &PageView::selectedTextAnnotationStyleChanged, this, showAnnotationStyle);
+    connect(m_view, &PageView::textAnnotationSelectionChanged, this,
+            [this, overlay, showTextBoxStyle](bool selected) {
+        if (!selected && !overlay->isEditing() && !m_view->isTextEditorOpen())
+            showTextBoxStyle();
+    });
+    connect(m_view, &PageView::textEditorClosed, this,
+            [this, overlay, showTextBoxStyle]() {
+        if (!overlay->isEditing() && !m_view->hasSelectedTextAnnotation())
+            showTextBoxStyle();
     });
 
     auto applyDrawStyle = [this, size, opacity, colorButton]() {
@@ -1372,7 +1375,8 @@ void MainWindow::setupToolsPane()
     connect(clearAreasButton, &QPushButton::clicked,
             m_view, &PageView::clearRedactionAreas);
 
-    applyTextBoxStyle();
+    m_textBoxStyle = styleFromControls();
+    m_view->setTextStyle(m_textBoxStyle);
     applyDrawStyle();
     refreshRedactionList();
     refreshESignatureList();

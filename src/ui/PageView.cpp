@@ -1,4 +1,5 @@
 #include "PageView.h"
+#include "AnnotationFonts.h"
 #include "Geometry.h"
 #include "MuPdfRenderCache.h"
 #include "SearchResultModel.h"
@@ -30,7 +31,12 @@
 #include <QScrollBar>
 #include <QThreadPool>
 #include <QStringList>
+#include <QTextBlock>
+#include <QTextCharFormat>
 #include <QTextCursor>
+#include <QTextDocument>
+#include <QTextEdit>
+#include <QTextFragment>
 #include <QTextOption>
 #include <QTimer>
 #include <QWheelEvent>
@@ -94,6 +100,195 @@ void drawDashedRegion(QPainter &painter, const QRectF &bounds, const QColor &lin
     painter.drawRect(bounds);
     painter.restore();
 }
+
+const int kRunFamilyProperty = QTextFormat::UserProperty + 1;
+const int kRunSizeProperty = QTextFormat::UserProperty + 2;
+
+QFont familyFont(const QString &family)
+{
+    QFont font;
+    font.setFamily(family);
+    if (family == QLatin1String("Times"))
+        font.setStyleHint(QFont::Serif);
+    else if (family == QLatin1String("Courier"))
+        font.setStyleHint(QFont::TypeWriter);
+    else
+        font.setStyleHint(QFont::SansSerif);
+    return font;
+}
+
+QTextCharFormat runFormat(const PdfEditor::TextBoxRun &run, double scale)
+{
+    QFont font = familyFont(run.family);
+    font.setPixelSize(qMax(1, qRound(run.sizePoints * scale)));
+    font.setBold(run.bold);
+    font.setItalic(run.italic);
+    font.setUnderline(run.underline);
+
+    QTextCharFormat format;
+    format.setFont(font);
+    format.setFontUnderline(run.underline);
+    format.setForeground(run.color);
+    format.setProperty(kRunFamilyProperty, run.family);
+    format.setProperty(kRunSizeProperty, run.sizePoints);
+    return format;
+}
+
+PdfEditor::TextBoxRun runFromFormat(const QTextCharFormat &format, double scale,
+                                    const PdfEditor::TextBoxRun &fallback)
+{
+    PdfEditor::TextBoxRun run = fallback;
+    run.text.clear();
+
+    const QString family = format.property(kRunFamilyProperty).toString();
+    if (!family.isEmpty())
+        run.family = family;
+
+    double size = format.property(kRunSizeProperty).toDouble();
+    if (size <= 0.0 && scale > 0.0 && format.font().pixelSize() > 0)
+        size = format.font().pixelSize() / scale;
+    if (size > 0.0)
+        run.sizePoints = size;
+
+    const QFont font = format.font();
+    run.bold = font.bold();
+    run.italic = font.italic();
+    run.underline = format.fontUnderline();
+    if (format.foreground().style() != Qt::NoBrush)
+        run.color = format.foreground().color();
+    return run;
+}
+
+PdfEditor::TextBoxRun runForStyle(const PageView::TextStyle &style)
+{
+    PdfEditor::TextBoxRun run;
+    run.family = style.family;
+    run.sizePoints = style.sizePoints;
+    run.color = style.color;
+    run.bold = style.bold;
+    run.italic = style.italic;
+    run.underline = style.underline;
+    return run;
+}
+
+PageView::TextStyle styleForRun(const PdfEditor::TextBoxRun &run)
+{
+    PageView::TextStyle style;
+    style.family = run.family;
+    style.sizePoints = run.sizePoints;
+    style.color = run.color;
+    style.bold = run.bold;
+    style.italic = run.italic;
+    style.underline = run.underline;
+    return style;
+}
+
+PageView::TextStyle displayStyle(const PdfEditor::TextBoxContent &content)
+{
+    PageView::TextStyle style = styleForRun(content.leadingRun());
+    style.alignment = AnnotationFonts::alignmentFromCode(content.alignment);
+    return style;
+}
+
+void applyPropertyToRun(PdfEditor::TextBoxRun &run, const PageView::TextStyle &style,
+                        PageView::TextProperty property)
+{
+    switch (property) {
+    case PageView::TextProperty::Family:    run.family = style.family; break;
+    case PageView::TextProperty::Size:      run.sizePoints = style.sizePoints; break;
+    case PageView::TextProperty::Color:     run.color = style.color; break;
+    case PageView::TextProperty::Bold:      run.bold = style.bold; break;
+    case PageView::TextProperty::Italic:    run.italic = style.italic; break;
+    case PageView::TextProperty::Underline: run.underline = style.underline; break;
+    case PageView::TextProperty::Alignment: break;
+    }
+}
+
+std::unique_ptr<QTextDocument> makeTextBoxDocument(const PdfEditor::TextBoxContent &content,
+                                                   double scale, double widthPx,
+                                                   const PdfEditor::TextBoxRun &emptyStyle)
+{
+    auto document = std::make_unique<QTextDocument>();
+    document->setDocumentMargin(0);
+
+    const Qt::AlignmentFlag alignment = AnnotationFonts::alignmentFromCode(content.alignment);
+    QTextOption option;
+    option.setWrapMode(QTextOption::WrapAtWordBoundaryOrAnywhere);
+    option.setAlignment(alignment);
+    document->setDefaultTextOption(option);
+    if (widthPx > 0.0)
+        document->setTextWidth(widthPx);
+
+    QTextBlockFormat blockFormat;
+    blockFormat.setAlignment(alignment);
+
+    QTextCursor cursor(document.get());
+    cursor.setBlockFormat(blockFormat);
+    cursor.setBlockCharFormat(
+        runFormat(content.runs.isEmpty() ? emptyStyle : content.runs.first(), scale));
+
+    for (const PdfEditor::TextBoxRun &run : content.runs) {
+        const QStringList parts = run.text.split(QLatin1Char('\n'));
+        for (int i = 0; i < int(parts.size()); ++i) {
+            if (i > 0)
+                cursor.insertBlock(blockFormat, runFormat(run, scale));
+            if (!parts.at(i).isEmpty())
+                cursor.insertText(parts.at(i), runFormat(run, scale));
+        }
+    }
+
+    document->setModified(false);
+    return document;
+}
+
+class EditorMoveHandle : public QWidget
+{
+public:
+    explicit EditorMoveHandle(QWidget *parent)
+        : QWidget(parent)
+    {
+        setFixedSize(34, 14);
+        setCursor(Qt::SizeAllCursor);
+        setToolTip(QStringLiteral("Drag to move this text box"));
+        setProperty("textEditorStyleControl", true);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.fillRect(rect(), QColor(0, 102, 204));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Qt::white);
+        for (int column = 0; column < 3; ++column) {
+            for (int row = 0; row < 2; ++row)
+                painter.drawEllipse(QPointF(9.0 + column * 8.0, 4.5 + row * 5.0), 1.5, 1.5);
+        }
+    }
+};
+
+class EditorResizeHandle : public QWidget
+{
+public:
+    EditorResizeHandle(QWidget *parent, int corner)
+        : QWidget(parent)
+    {
+        setFixedSize(10, 10);
+        setCursor((corner == 0 || corner == 3) ? Qt::SizeFDiagCursor : Qt::SizeBDiagCursor);
+        setToolTip(QStringLiteral("Drag to resize this text box"));
+        setProperty("textEditorStyleControl", true);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter painter(this);
+        painter.fillRect(rect(), Qt::white);
+        painter.setPen(QPen(QColor(0, 102, 204), 1));
+        painter.drawRect(rect().adjusted(0, 0, -1, -1));
+    }
+};
 }
 
 PageView::PageView(QWidget *parent)
@@ -1352,8 +1547,8 @@ void PageView::drawSelectionHighlight(QPainter &painter, int page, const QRect &
 
 void PageView::drawTextAnnotationPreview(QPainter &painter, int page, const QRect &target,
                                          qreal dpr, const QRectF &oldBounds,
-                                         const QRectF &newBounds, const QString &text,
-                                         const TextStyle &style)
+                                         const QRectF &newBounds,
+                                         const PdfEditor::TextBoxContent &content)
 {
     if (!oldBounds.isEmpty()) {
         const QPixmap basePage = pageImage(page, target.size(), dpr, false);
@@ -1366,16 +1561,16 @@ void PageView::drawTextAnnotationPreview(QPainter &painter, int page, const QRec
         }
     }
 
-    QFont font(style.family);
-    font.setPixelSize(qMax(1, qRound(style.sizePoints * m_scale)));
-    font.setBold(style.bold);
-    font.setItalic(style.italic);
-    font.setUnderline(style.underline);
+    if (newBounds.isEmpty() || content.runs.isEmpty())
+        return;
+
+    const QRectF area = pageToViewport(target, newBounds);
+    const std::unique_ptr<QTextDocument> document =
+        makeTextBoxDocument(content, m_scale, area.width(), runForStyle(m_style));
     painter.save();
-    painter.setFont(font);
-    painter.setPen(style.color);
-    painter.drawText(pageToViewport(target, newBounds),
-                     int(style.alignment) | int(Qt::AlignTop) | int(Qt::TextWordWrap), text);
+    painter.setClipRect(area, Qt::IntersectClip);
+    painter.translate(area.topLeft());
+    document->drawContents(&painter);
     painter.restore();
 }
 
@@ -1412,15 +1607,13 @@ void PageView::drawPageOverlays(QPainter &painter, int page, const QRect &target
         drawTextAnnotationPreview(painter, page, target, dpr,
                                   m_textAnnotationResizeOriginalBounds,
                                   m_selectedTextAnnotationBounds,
-                                  m_selectedTextAnnotationContents,
-                                  m_selectedTextAnnotationStyle);
+                                  m_selectedTextAnnotationContent);
     }
     if (m_pendingTextAnnotationPreview.page == page) {
         drawTextAnnotationPreview(painter, page, target, dpr,
                                   m_pendingTextAnnotationPreview.oldBounds,
                                   m_pendingTextAnnotationPreview.newBounds,
-                                  m_pendingTextAnnotationPreview.text,
-                                  m_pendingTextAnnotationPreview.style);
+                                  m_pendingTextAnnotationPreview.content);
     }
 
     if (m_selectedImagePage == page) {
@@ -1439,7 +1632,12 @@ void PageView::drawPageOverlays(QPainter &painter, int page, const QRect &target
                               m_pendingImageStampPreview.image);
     }
 
-    if (m_selectedTextAnnotationPage == page) {
+    const bool editingAnnotation = m_editor && m_editingTextAnnotation;
+    if (editingAnnotation && m_editorPage == page && m_editorBox != m_editorOriginalBox) {
+        drawTextAnnotationPreview(painter, page, target, dpr, m_editorOriginalBox,
+                                  QRectF(), PdfEditor::TextBoxContent());
+    }
+    if (m_selectedTextAnnotationPage == page && !editingAnnotation) {
         drawSelectionFrame(painter,
                            pageToViewport(target, m_selectedTextAnnotationBounds),
                            QColor(0, 102, 204, 35));
@@ -1831,16 +2029,13 @@ void PageView::contextMenuEvent(QContextMenuEvent *event)
     const int page = pageAtViewportPoint(event->pos());
     int annotationId = 0;
     QRectF annotationBounds;
-    QString annotationText;
-    TextStyle annotationStyle;
+    PdfEditor::TextBoxContent annotationContent;
     const bool onAnnotation = page >= 0 && m_textAnnotationHandler
         && m_textAnnotationHandler(page, pagePointFor(page, event->pos()),
-                                   &annotationId, &annotationBounds, &annotationText,
-                                   &annotationStyle);
+                                   &annotationId, &annotationBounds, &annotationContent);
     if (onAnnotation) {
         clearSelectedImageStamp();
-        selectTextAnnotation(page, annotationId, annotationBounds,
-                             annotationText, annotationStyle);
+        selectTextAnnotation(page, annotationId, annotationBounds, annotationContent);
     } else {
         clearSelectedTextAnnotation();
     }
@@ -2084,10 +2279,10 @@ void PageView::preserveErasedStrokes(int page, const QVector<Stroke> &strokes)
 }
 
 void PageView::preserveTextAnnotationChange(int page, const QRectF &oldBounds,
-                                            const QRectF &newBounds, const QString &text,
-                                            const TextStyle &style)
+                                            const QRectF &newBounds,
+                                            const PdfEditor::TextBoxContent &content)
 {
-    m_pendingTextAnnotationPreview = { page, oldBounds, newBounds, text, style };
+    m_pendingTextAnnotationPreview = { page, oldBounds, newBounds, content };
     viewport()->update();
 }
 
@@ -2376,10 +2571,12 @@ void PageView::drawImagePlacement(QPainter &painter, const QRect &pageRect)
 
 void PageView::setTextToolActive(bool active)
 {
-    if (!active)
+    if (!active) {
         finishEditor(true);
-    else
+    } else {
         clearSelection();
+        clearSelectedTextAnnotation();
+    }
     m_textTool = active;
     m_dragging = false;
     m_dragRect = QRect();
@@ -2393,19 +2590,49 @@ void PageView::setTextToolActive(bool active)
 void PageView::setTextStyle(const TextStyle &style)
 {
     m_style = style;
+}
+
+bool PageView::applyTextFormatChange(const TextStyle &style, TextProperty property)
+{
     if (m_editor) {
-        if (m_editingTextAnnotation
-            && (m_editorStyle.family != style.family
-                || !qFuzzyCompare(m_editorStyle.sizePoints, style.sizePoints)
-                || m_editorStyle.color != style.color
-                || m_editorStyle.bold != style.bold
-                || m_editorStyle.italic != style.italic
-                || m_editorStyle.underline != style.underline
-                || m_editorStyle.alignment != style.alignment))
-            m_editingTextAnnotationStyleChanged = true;
-        m_editorStyle = style;
-        applyEditorStyle();
+        applyEditorProperty(style, property);
+        return true;
     }
+    if (!canRestyleSelectedTextAnnotation())
+        return false;
+    applySelectedTextAnnotationProperty(style, property);
+    return true;
+}
+
+bool PageView::canRestyleSelectedTextAnnotation() const
+{
+    return m_selectedTextAnnotationPage >= 0 && !m_editor && !m_movingTextAnnotation
+           && !m_resizingTextAnnotation && !m_textTool && !m_drawTool && !m_redactionTool
+           && !m_signatureTool && !m_reconstruction->isActive();
+}
+
+void PageView::applySelectedTextAnnotationProperty(const TextStyle &style,
+                                                   TextProperty property)
+{
+    PdfEditor::TextBoxContent content = m_selectedTextAnnotationContent;
+    for (PdfEditor::TextBoxRun &run : content.runs)
+        applyPropertyToRun(run, style, property);
+    if (property == TextProperty::Alignment)
+        content.alignment = AnnotationFonts::alignmentCode(style.alignment);
+    if (content.sameAs(m_selectedTextAnnotationContent))
+        return;
+
+    const int page = m_selectedTextAnnotationPage;
+    const int annotationId = m_selectedTextAnnotationId;
+    const QString text = m_selectedTextAnnotationContents;
+    QTimer::singleShot(0, this, [this, page, annotationId, text, content]() {
+        if (m_selectedTextAnnotationPage != page
+            || m_selectedTextAnnotationId != annotationId
+            || m_selectedTextAnnotationContents != text
+            || content.sameAs(m_selectedTextAnnotationContent))
+            return;
+        emit textAnnotationEdited(page, annotationId, text, content);
+    });
 }
 
 void PageView::setFormFieldHandler(
@@ -2421,8 +2648,8 @@ void PageView::setFormFieldValueHandler(
 }
 
 void PageView::setTextAnnotationHandler(
-    const std::function<bool(int, const QPointF &, int *, QRectF *, QString *,
-                             TextStyle *)> &handler)
+    const std::function<bool(int, const QPointF &, int *, QRectF *,
+                             PdfEditor::TextBoxContent *)> &handler)
 {
     m_textAnnotationHandler = handler;
 }
@@ -2435,12 +2662,13 @@ void PageView::setImageStampHandler(
 
 void PageView::editTextAnnotationInline(int page, int annotationId, const QString &text)
 {
+    Q_UNUSED(text);
     if (m_selectedTextAnnotationPage != page
         || m_selectedTextAnnotationId != annotationId)
         return;
 
-    startAnnotationEditor(page, annotationId, m_selectedTextAnnotationBounds,
-                          text, m_selectedTextAnnotationStyle);
+    const PdfEditor::TextBoxContent content = m_selectedTextAnnotationContent;
+    startAnnotationEditor(page, annotationId, m_selectedTextAnnotationBounds, content);
 }
 
 void PageView::refreshSelectedTextAnnotation()
@@ -2450,14 +2678,12 @@ void PageView::refreshSelectedTextAnnotation()
 
     int annotationId = 0;
     QRectF bounds;
-    QString text;
-    TextStyle style;
+    PdfEditor::TextBoxContent content;
     const QPointF center = m_selectedTextAnnotationBounds.center();
     if (m_textAnnotationHandler
         && m_textAnnotationHandler(m_selectedTextAnnotationPage, center,
-                                   &annotationId, &bounds, &text, &style)) {
-        selectTextAnnotation(m_selectedTextAnnotationPage, annotationId,
-                             bounds, text, style);
+                                   &annotationId, &bounds, &content)) {
+        selectTextAnnotation(m_selectedTextAnnotationPage, annotationId, bounds, content);
     } else {
         clearSelectedTextAnnotation();
     }
@@ -2522,16 +2748,17 @@ void PageView::clearSelectedImageStamp()
 }
 
 void PageView::selectTextAnnotation(int page, int annotationId, const QRectF &bounds,
-                                    const QString &text, const TextStyle &style)
+                                    const PdfEditor::TextBoxContent &content)
 {
     const bool wasSelected = m_selectedTextAnnotationPage >= 0;
     m_selectedTextAnnotationPage = page;
     m_selectedTextAnnotationId = annotationId;
     m_selectedTextAnnotationBounds = bounds;
-    m_selectedTextAnnotationContents = text;
-    m_selectedTextAnnotationStyle = style;
+    m_selectedTextAnnotationContent = content;
+    m_selectedTextAnnotationContents = content.plainText();
     if (!wasSelected)
         emit textAnnotationSelectionChanged(true);
+    emit selectedTextAnnotationStyleChanged(displayStyle(content));
     viewport()->update();
 }
 
@@ -2543,7 +2770,7 @@ void PageView::clearSelectedTextAnnotation()
     m_selectedTextAnnotationId = 0;
     m_selectedTextAnnotationBounds = QRectF();
     m_selectedTextAnnotationContents.clear();
-    m_selectedTextAnnotationStyle = TextStyle();
+    m_selectedTextAnnotationContent = PdfEditor::TextBoxContent();
     emit textAnnotationSelectionChanged(false);
     viewport()->update();
 }
@@ -2643,7 +2870,8 @@ bool PageView::hasPendingChanges() const
     if (m_editor) {
         const QString text = m_editor->toPlainText();
         if (m_editingTextAnnotation)
-            return text != m_editingTextAnnotationOriginal;
+            return !editorContent().sameAs(m_editingTextAnnotationOriginalContent)
+                   || m_editorBox != m_editorOriginalBox;
         return !text.trimmed().isEmpty();
     }
     return m_formEditor && formEditorValue() != m_formEditorInitialValue;
@@ -2877,15 +3105,13 @@ void PageView::mousePressEvent(QMouseEvent *event)
         const int page = pageAtViewportPoint(pos);
         int annotationId = 0;
         QRectF annotationBounds;
-        QString annotationText;
-        TextStyle annotationStyle;
+        PdfEditor::TextBoxContent annotationContent;
         if (page >= 0 && m_textAnnotationHandler
             && m_textAnnotationHandler(page, pagePointFor(page, pos),
-                                       &annotationId, &annotationBounds, &annotationText,
-                                       &annotationStyle)) {
+                                       &annotationId, &annotationBounds,
+                                       &annotationContent)) {
             clearSelectedImageStamp();
-            selectTextAnnotation(page, annotationId, annotationBounds,
-                                 annotationText, annotationStyle);
+            selectTextAnnotation(page, annotationId, annotationBounds, annotationContent);
             clearSelection();
             return;
         }
@@ -2964,14 +3190,13 @@ void PageView::mouseDoubleClickEvent(QMouseEvent *event)
         const int page = pageAtViewportPoint(pos);
         int annotationId = 0;
         QRectF bounds;
-        QString text;
-        TextStyle style;
+        PdfEditor::TextBoxContent content;
         if (page >= 0 && m_textAnnotationHandler
             && m_textAnnotationHandler(page, pagePointFor(page, pos),
-                                       &annotationId, &bounds, &text, &style)) {
+                                       &annotationId, &bounds, &content)) {
             clearSelectedImageStamp();
-            selectTextAnnotation(page, annotationId, bounds, text, style);
-            emit textAnnotationEditRequested(page, annotationId, text);
+            selectTextAnnotation(page, annotationId, bounds, content);
+            emit textAnnotationEditRequested(page, annotationId, content.plainText());
             return;
         }
         if (page >= 0) {
@@ -3342,7 +3567,7 @@ void PageView::mouseReleaseEvent(QMouseEvent *event)
                                              m_selectedTextAnnotationContents,
                                              m_textAnnotationResizeOriginalBounds,
                                              m_selectedTextAnnotationBounds,
-                                             m_selectedTextAnnotationStyle);
+                                             m_selectedTextAnnotationContent);
         }
         return;
     }
@@ -3388,7 +3613,7 @@ void PageView::mouseReleaseEvent(QMouseEvent *event)
                                              m_selectedTextAnnotationContents,
                                              m_textAnnotationResizeOriginalBounds,
                                              m_selectedTextAnnotationBounds,
-                                             m_selectedTextAnnotationStyle);
+                                             m_selectedTextAnnotationContent);
         }
         return;
     }
@@ -3475,70 +3700,289 @@ void PageView::mouseReleaseEvent(QMouseEvent *event)
 
 // text editor
 
-void PageView::startEditor(int page, const QRectF &boxPoints)
+void PageView::startEditor(int page, const QRectF &boxPoints,
+                           const PdfEditor::TextBoxContent &initial)
 {
+    destroyEditorHandles();
     m_editorPage = page;
     m_editorBox = boxPoints;
-    m_editorStyle = m_style;
+    m_editorOriginalBox = boxPoints;
     m_editingTextAnnotation = false;
     m_editingTextAnnotationId = 0;
     m_editingTextAnnotationOriginal.clear();
+    m_editingTextAnnotationOriginalContent = PdfEditor::TextBoxContent();
 
-    m_editor = new QPlainTextEdit(viewport());
+    m_editorInitial = initial;
+    m_editorScale = 0.0;
+    m_editorBackground.clear();
+    if (!initial.runs.isEmpty()) {
+        m_editorTyping = initial.leadingRun();
+        m_editorAlignment = AnnotationFonts::alignmentFromCode(initial.alignment);
+    } else {
+        m_editorTyping = runForStyle(m_style);
+        m_editorAlignment = m_style.alignment;
+        m_editorInitial.alignment = AnnotationFonts::alignmentCode(m_editorAlignment);
+    }
+    m_editorTyping.text.clear();
+
+    m_editor = new QTextEdit(viewport());
     m_editor->setFrameShape(QFrame::NoFrame);
+    m_editor->setAcceptRichText(false);
     m_editor->installEventFilter(this);
-    connect(m_editor, &QPlainTextEdit::textChanged,
+    connect(m_editor, &QTextEdit::textChanged,
             this, &PageView::pendingChangesChanged);
+    connect(m_editor, &QTextEdit::currentCharFormatChanged, this, [this]() {
+        if (m_editorRebuilding)
+            return;
+        updateEditorBackground();
+        emitEditorFormat();
+    });
+
+    m_editorMoveHandle = new EditorMoveHandle(viewport());
+    m_editorMoveHandle->installEventFilter(this);
+    for (int corner = 0; corner < 4; ++corner) {
+        m_editorResizeHandles[corner] = new EditorResizeHandle(viewport(), corner);
+        m_editorResizeHandles[corner]->installEventFilter(this);
+    }
+
     applyEditorStyle();
     positionEditor();
     m_editor->show();
+    m_editorMoveHandle->show();
+    for (QWidget *handle : m_editorResizeHandles)
+        handle->show();
     m_editor->setFocus();
+    emitEditorFormat();
     emit pendingChangesChanged();
 }
 
-void PageView::startAnnotationEditor(int page, int annotationId,
-                                     const QRectF &boxPoints, const QString &text,
-                                     const TextStyle &style)
+void PageView::startAnnotationEditor(int page, int annotationId, const QRectF &boxPoints,
+                                     const PdfEditor::TextBoxContent &content)
 {
+    const PdfEditor::TextBoxContent initial = content;
     finishEditor(false);
     m_textTool = false;
-    startEditor(page, boxPoints);
+    startEditor(page, boxPoints, initial);
     m_editingTextAnnotation = true;
     m_editingTextAnnotationId = annotationId;
-    m_editingTextAnnotationOriginal = text;
-    m_editingTextAnnotationStyleChanged = false;
-    m_editorStyle = style;
-    m_editor->setPlainText(text);
+    m_editingTextAnnotationOriginal = initial.plainText();
+    m_editingTextAnnotationOriginalContent = initial;
     m_editor->moveCursor(QTextCursor::End);
-    applyEditorStyle();
     m_editor->setFocus();
-    emit textAnnotationEditingStyleChanged(style);
+    emitEditorFormat();
 }
 
 void PageView::applyEditorStyle()
 {
+    if (!m_editor || m_editorRebuilding)
+        return;
+    if (m_editorScale <= 0.0 || !qFuzzyCompare(m_editorScale, m_scale))
+        rebuildEditorDocument();
+    updateEditorBackground();
+}
+
+void PageView::updateEditorBackground()
+{
+    if (!m_editor || m_editorRebuilding)
+        return;
+
+    const QBrush brush = m_editor->currentCharFormat().foreground();
+    const QColor color = brush.style() != Qt::NoBrush ? brush.color() : m_editorTyping.color;
+    const QString background = color.lightness() > 200
+        ? QStringLiteral("rgba(60,60,60,225)")
+        : QStringLiteral("rgba(255,255,255,215)");
+    if (background == m_editorBackground)
+        return;
+
+    m_editorBackground = background;
+    m_editor->setStyleSheet(
+        QStringLiteral("QTextEdit { background: %1; border: 2px solid #0066cc; }")
+            .arg(background));
+}
+
+void PageView::rebuildEditorDocument()
+{
+    if (!m_editor || m_editorRebuilding)
+        return;
+    m_editorRebuilding = true;
+
+    QTextDocument *old = m_editor->document();
+    const bool weOwnOld = old && old->parent() == m_editor;
+
+    PdfEditor::TextBoxContent content = m_editorInitial;
+    int cursorPosition = -1;
+    int anchorPosition = -1;
+    bool modified = false;
+    if (m_editorScale > 0.0 && old) {
+        content = editorContent();
+        m_editorTyping = runFromFormat(m_editor->currentCharFormat(), m_editorScale,
+                                       m_editorTyping);
+        m_editorTyping.text.clear();
+        const QTextCursor cursor = m_editor->textCursor();
+        cursorPosition = cursor.position();
+        anchorPosition = cursor.anchor();
+        modified = old->isModified();
+    }
+
+    std::unique_ptr<QTextDocument> document = makeTextBoxDocument(
+        content, m_scale, m_editor->viewport()->width(), m_editorTyping);
+    document->setParent(m_editor);
+    QTextDocument *created = document.release();
+    m_editor->setDocument(created);
+    if (weOwnOld && old != created)
+        old->deleteLater();
+    m_editorScale = m_scale;
+
+    if (cursorPosition >= 0) {
+        const int last = qMax(0, created->characterCount() - 1);
+        QTextCursor cursor(created);
+        cursor.setPosition(qMin(anchorPosition, last));
+        cursor.setPosition(qMin(cursorPosition, last), QTextCursor::KeepAnchor);
+        m_editor->setTextCursor(cursor);
+    }
+    if (created->isEmpty())
+        m_editor->setCurrentCharFormat(runFormat(m_editorTyping, m_scale));
+    created->setModified(modified);
+
+    m_editorRebuilding = false;
+    emitEditorFormat();
+}
+
+PdfEditor::TextBoxContent PageView::editorContent() const
+{
+    PdfEditor::TextBoxContent content;
+    content.alignment = AnnotationFonts::alignmentCode(m_editorAlignment);
+    if (!m_editor)
+        return content;
+
+    const double scale = m_editorScale > 0.0 ? m_editorScale : m_scale;
+    PdfEditor::TextBoxRun last = m_editorTyping;
+    for (QTextBlock block = m_editor->document()->begin(); block.isValid();
+         block = block.next()) {
+        for (QTextBlock::iterator it = block.begin(); !it.atEnd(); ++it) {
+            const QTextFragment fragment = it.fragment();
+            if (!fragment.isValid())
+                continue;
+
+            PdfEditor::TextBoxRun run =
+                runFromFormat(fragment.charFormat(), scale, m_editorTyping);
+            run.text = fragment.text();
+            run.text.replace(QChar(QChar::LineSeparator), QChar(QChar::LineFeed));
+            last = run;
+            content.runs.append(run);
+        }
+        if (block.next().isValid()) {
+            PdfEditor::TextBoxRun newline = last;
+            newline.text = QStringLiteral("\n");
+            content.runs.append(newline);
+        }
+    }
+    content.normalize();
+    return content;
+}
+
+void PageView::emitEditorFormat()
+{
+    if (!m_editor || m_editorRebuilding)
+        return;
+
+    const PdfEditor::TextBoxRun run = runFromFormat(
+        m_editor->currentCharFormat(), m_editorScale > 0.0 ? m_editorScale : m_scale,
+        m_editorTyping);
+    TextStyle style = styleForRun(run);
+    style.alignment = m_editorAlignment;
+    emit textEditorFormatChanged(style);
+}
+
+void PageView::applyEditorFormat(const QTextCharFormat &change)
+{
+    if (!m_editor)
+        return;
+    m_editor->mergeCurrentCharFormat(change);
+    updateEditorBackground();
+    emitEditorFormat();
+}
+
+void PageView::applyEditorProperty(const TextStyle &style, TextProperty property)
+{
     if (!m_editor)
         return;
 
-    const QString background = m_editorStyle.color.lightness() > 200
-        ? QStringLiteral("rgba(60,60,60,225)")
-        : QStringLiteral("rgba(255,255,255,215)");
-
-    m_editor->setStyleSheet(
-        QStringLiteral("QPlainTextEdit { color: %1; background: %2; border: 2px solid #0066cc;"
-                       " font-family: \"%3\"; font-size: %4px;"
-                       " font-weight: %5; font-style: %6; text-decoration: %7; }")
-            .arg(m_editorStyle.color.name(), background, m_editorStyle.family)
-            .arg(qMax(4, int(m_editorStyle.sizePoints * m_scale)))
-            .arg(m_editorStyle.bold ? QStringLiteral("bold") : QStringLiteral("normal"),
-                 m_editorStyle.italic ? QStringLiteral("italic") : QStringLiteral("normal"))
-            .arg(m_editorStyle.underline ? QStringLiteral("underline") : QStringLiteral("none")));
-
-    QTextOption option = m_editor->document()->defaultTextOption();
-    if (option.alignment() != Qt::Alignment(m_editorStyle.alignment)) {
-        option.setAlignment(m_editorStyle.alignment);
-        m_editor->document()->setDefaultTextOption(option);
+    if (property == TextProperty::Alignment) {
+        setEditorAlignment(style.alignment);
+        return;
     }
+
+    const double scale = m_editorScale > 0.0 ? m_editorScale : m_scale;
+    QTextCharFormat change;
+    switch (property) {
+    case TextProperty::Family:
+        change.setFont(familyFont(style.family), QTextCharFormat::FontPropertiesSpecifiedOnly);
+        change.setProperty(kRunFamilyProperty, style.family);
+        break;
+    case TextProperty::Size: {
+        QFont font;
+        font.setPixelSize(qMax(1, qRound(style.sizePoints * scale)));
+        change.setFont(font, QTextCharFormat::FontPropertiesSpecifiedOnly);
+        change.setProperty(kRunSizeProperty, style.sizePoints);
+        break;
+    }
+    case TextProperty::Color:
+        change.setForeground(style.color);
+        break;
+    case TextProperty::Bold:
+        change.setFontWeight(style.bold ? QFont::Bold : QFont::Normal);
+        break;
+    case TextProperty::Italic:
+        change.setFontItalic(style.italic);
+        break;
+    case TextProperty::Underline:
+        change.setFontUnderline(style.underline);
+        break;
+    case TextProperty::Alignment:
+        break;
+    }
+    applyEditorFormat(change);
+}
+
+void PageView::toggleEditorFormat(int which)
+{
+    if (!m_editor)
+        return;
+
+    const PdfEditor::TextBoxRun run = runFromFormat(
+        m_editor->currentCharFormat(), m_editorScale > 0.0 ? m_editorScale : m_scale,
+        m_editorTyping);
+    QTextCharFormat change;
+    if (which == 0)
+        change.setFontWeight(run.bold ? QFont::Normal : QFont::Bold);
+    else if (which == 1)
+        change.setFontItalic(!run.italic);
+    else
+        change.setFontUnderline(!run.underline);
+    applyEditorFormat(change);
+}
+
+void PageView::setEditorAlignment(Qt::AlignmentFlag alignment)
+{
+    if (!m_editor)
+        return;
+
+    m_editorAlignment = alignment;
+    QTextDocument *document = m_editor->document();
+
+    QTextOption option = document->defaultTextOption();
+    option.setAlignment(alignment);
+    document->setDefaultTextOption(option);
+
+    QTextBlockFormat format;
+    format.setAlignment(alignment);
+    QTextCursor all(document);
+    all.select(QTextCursor::Document);
+    all.mergeBlockFormat(format);
+
+    emitEditorFormat();
+    emit pendingChangesChanged();
 }
 
 void PageView::positionEditor()
@@ -3550,6 +3994,127 @@ void PageView::positionEditor()
                           page.y() + int(m_editorBox.y() * m_scale),
                           qMax(40, int(m_editorBox.width() * m_scale)),
                           qMax(24, int(m_editorBox.height() * m_scale)));
+    positionEditorHandles();
+}
+
+void PageView::positionEditorHandles()
+{
+    if (!m_editor)
+        return;
+
+    const QRect box = m_editor->geometry();
+    const QPoint corners[4] = { box.topLeft(), box.topRight(), box.bottomLeft(),
+                                box.bottomRight() };
+    for (int corner = 0; corner < 4; ++corner) {
+        if (!m_editorResizeHandles[corner])
+            continue;
+        m_editorResizeHandles[corner]->move(corners[corner] - QPoint(5, 5));
+        m_editorResizeHandles[corner]->raise();
+    }
+
+    if (m_editorMoveHandle) {
+        const int above = box.y() - m_editorMoveHandle->height();
+        m_editorMoveHandle->move(box.x() + (box.width() - m_editorMoveHandle->width()) / 2,
+                                 above >= 0 ? above : box.bottom() + 1);
+        m_editorMoveHandle->raise();
+    }
+}
+
+void PageView::destroyEditorHandles()
+{
+    m_editorDrag = EditorDrag::None;
+    m_editorResizeCorner = -1;
+    for (QWidget *&handle : m_editorResizeHandles) {
+        if (handle) {
+            handle->hide();
+            handle->deleteLater();
+            handle = nullptr;
+        }
+    }
+    if (m_editorMoveHandle) {
+        m_editorMoveHandle->hide();
+        m_editorMoveHandle->deleteLater();
+        m_editorMoveHandle = nullptr;
+    }
+}
+
+bool PageView::handleEditorHandleEvent(QObject *watched, QEvent *event)
+{
+    int corner = -1;
+    for (int i = 0; i < 4; ++i) {
+        if (m_editorResizeHandles[i] && watched == m_editorResizeHandles[i])
+            corner = i;
+    }
+    const bool isMove = m_editorMoveHandle && watched == m_editorMoveHandle;
+    if (!m_editor || (!isMove && corner < 0))
+        return false;
+
+    switch (event->type()) {
+    case QEvent::MouseButtonPress: {
+        auto *mouse = static_cast<QMouseEvent *>(event);
+        if (mouse->button() == Qt::LeftButton) {
+            m_editorDrag = isMove ? EditorDrag::Move : EditorDrag::Resize;
+            m_editorResizeCorner = corner;
+            m_editorDragStartMouse = mouse->globalPosition();
+            m_editorDragStartBox = m_editorBox;
+        }
+        m_editor->setFocus(Qt::MouseFocusReason);
+        return true;
+    }
+    case QEvent::MouseMove:
+        if (m_editorDrag != EditorDrag::None && m_scale > 0.0) {
+            const QPointF moved =
+                static_cast<QMouseEvent *>(event)->globalPosition() - m_editorDragStartMouse;
+            dragEditorBox(moved / m_scale);
+        }
+        return true;
+    case QEvent::MouseButtonRelease: {
+        const bool dragged = m_editorDrag != EditorDrag::None;
+        m_editorDrag = EditorDrag::None;
+        m_editorResizeCorner = -1;
+        if (dragged)
+            emit pendingChangesChanged();
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+void PageView::dragEditorBox(const QPointF &delta)
+{
+    if (!m_editor || m_editorPage < 0 || m_editorPage >= m_pageSizes.size())
+        return;
+
+    const QSizeF pageSize = m_pageSizes.at(m_editorPage);
+    QRectF box = m_editorDragStartBox;
+
+    if (m_editorDrag == EditorDrag::Move) {
+        box.moveTopLeft(box.topLeft() + delta);
+        box.moveLeft(qBound(0.0, box.left(), qMax(0.0, pageSize.width() - box.width())));
+        box.moveTop(qBound(0.0, box.top(), qMax(0.0, pageSize.height() - box.height())));
+    } else if (m_editorDrag == EditorDrag::Resize) {
+        const qreal minWidth = qMax(20.0, 40.0 / m_scale);
+        const qreal minHeight = qMax(14.0, 24.0 / m_scale);
+        const bool leftSide = m_editorResizeCorner == 0 || m_editorResizeCorner == 2;
+        const bool topSide = m_editorResizeCorner == 0 || m_editorResizeCorner == 1;
+        if (leftSide)
+            box.setLeft(qMax(0.0, qMin(box.left() + delta.x(), box.right() - minWidth)));
+        else
+            box.setRight(qMin(pageSize.width(),
+                              qMax(box.right() + delta.x(), box.left() + minWidth)));
+        if (topSide)
+            box.setTop(qMax(0.0, qMin(box.top() + delta.y(), box.bottom() - minHeight)));
+        else
+            box.setBottom(qMin(pageSize.height(),
+                               qMax(box.bottom() + delta.y(), box.top() + minHeight)));
+    } else {
+        return;
+    }
+
+    m_editorBox = box;
+    positionEditor();
+    viewport()->update();
 }
 
 void PageView::finishEditor(bool commit)
@@ -3557,24 +4122,27 @@ void PageView::finishEditor(bool commit)
     if (!m_editor)
         return;
 
-    QPlainTextEdit *editor = m_editor;
+    PdfEditor::TextBoxContent content = editorContent();
+    QTextEdit *editor = m_editor;
     m_editor = nullptr;
 
-    const QString text = editor->toPlainText();
     const int page = m_editorPage;
     const QRectF box = m_editorBox;
-    const TextStyle style = m_editorStyle;
+    const QRectF originalBox = m_editorOriginalBox;
     const bool editingAnnotation = m_editingTextAnnotation;
     const int annotationId = m_editingTextAnnotationId;
     const QString originalText = m_editingTextAnnotationOriginal;
-    const bool annotationStyleChanged = m_editingTextAnnotationStyleChanged;
+    const PdfEditor::TextBoxContent originalContent = m_editingTextAnnotationOriginalContent;
     m_editingTextAnnotation = false;
     m_editingTextAnnotationId = 0;
     m_editingTextAnnotationOriginal.clear();
-    m_editingTextAnnotationStyleChanged = false;
+    m_editingTextAnnotationOriginalContent = PdfEditor::TextBoxContent();
+    m_editorInitial = PdfEditor::TextBoxContent();
+    m_editorScale = 0.0;
 
     editor->hide();
     editor->deleteLater();
+    destroyEditorHandles();
 
     if (!editingAnnotation) {
         m_textTool = false;
@@ -3585,12 +4153,24 @@ void PageView::finishEditor(bool commit)
 
     if (commit) {
         if (editingAnnotation) {
-            if (text != originalText || annotationStyleChanged)
-                emit textAnnotationEdited(page, annotationId, originalText, text, style);
-        } else if (!text.trimmed().isEmpty()) {
-            emit textPlaced(page, box, text.trimmed(), style);
+            const bool edited = !content.sameAs(originalContent);
+            const bool moved = box != originalBox;
+            if (edited)
+                emit textAnnotationEdited(page, annotationId, originalText, content);
+            if (moved && (!edited || !content.plainText().trimmed().isEmpty()))
+                emit textAnnotationBoundsChanged(
+                    page, annotationId, edited ? content.plainText() : originalText,
+                    originalBox, box, content);
+        } else {
+            content.trim();
+            if (!content.runs.isEmpty())
+                emit textPlaced(page, box, content);
         }
     }
+
+    if (m_selectedTextAnnotationPage >= 0)
+        emit selectedTextAnnotationStyleChanged(displayStyle(m_selectedTextAnnotationContent));
+    emit textEditorClosed();
     emit pendingChangesChanged();
 }
 
@@ -3752,6 +4332,9 @@ bool PageView::eventFilter(QObject *watched, QEvent *event)
     if (watched == viewport() && event->type() == QEvent::Leave)
         setHoveredLink(QUrl());
 
+    if (m_editor && handleEditorHandleEvent(watched, event))
+        return true;
+
     if (m_formEditor
         && (watched == m_formEditor
             || (m_formChoiceEditor && watched == m_formChoiceEditor->lineEdit()))) {
@@ -3784,10 +4367,34 @@ bool PageView::eventFilter(QObject *watched, QEvent *event)
     }
 
     if (m_editor && watched == m_editor) {
-        if (event->type() == QEvent::KeyPress) {
+        if (event->type() == QEvent::Wheel
+            && (static_cast<QWheelEvent *>(event)->modifiers() & Qt::ControlModifier)) {
+            wheelEvent(static_cast<QWheelEvent *>(event));
+            return true;
+        }
+
+        const auto isFormatShortcut = [](const QKeyEvent *key) {
+            const Qt::KeyboardModifiers modifiers = key->modifiers();
+            return (modifiers & Qt::ControlModifier)
+                   && !(modifiers & (Qt::ShiftModifier | Qt::AltModifier))
+                   && (key->key() == Qt::Key_B || key->key() == Qt::Key_I
+                       || key->key() == Qt::Key_U);
+        };
+
+        if (event->type() == QEvent::ShortcutOverride) {
+            if (isFormatShortcut(static_cast<QKeyEvent *>(event))) {
+                event->accept();
+                return true;
+            }
+        } else if (event->type() == QEvent::KeyPress) {
             auto *key = static_cast<QKeyEvent *>(event);
             if (key->key() == Qt::Key_Escape) {
                 finishEditor(false);
+                return true;
+            }
+            if (isFormatShortcut(key)) {
+                toggleEditorFormat(key->key() == Qt::Key_B ? 0
+                                   : key->key() == Qt::Key_I ? 1 : 2);
                 return true;
             }
             if ((key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter)
